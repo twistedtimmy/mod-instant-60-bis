@@ -79,3 +79,21 @@ INSERT IGNORE INTO playercreateinfo_item (race, class, itemid, amount)
 SELECT p.race, p.class, t.itemid, 1
 FROM playercreateinfo p
 JOIN temp_bis t ON t.class_id = p.class;
+
+-- Universal Riding & Cross-Faction Epic Mount Spells
+INSERT IGNORE INTO playercreateinfo_spell_custom (racemask, classmask, Spell, Note) VALUES
+(0, 0, 33388, 'Apprentice Riding'),
+(0, 0, 33391, 'Journeyman Riding'),
+(0, 0, 34090, 'Expert Riding'),
+(0, 0, 34091, 'Artisan Riding'),
+(0, 0, 54197, 'Cold Weather Flying'),
+(0, 0, 23229, 'Swift Brown Steed'),
+(0, 0, 23238, 'Swift Brown Ram'),
+(0, 0, 23241, 'Swift Mistsaber'),
+(0, 0, 23225, 'Swift Green Mechanostrider'),
+(0, 0, 35710, 'Great Blue Elekk'),
+(0, 0, 23250, 'Swift Brown Wolf'),
+(0, 0, 23246, 'Green Skeletal Warhorse'),
+(0, 0, 23249, 'Great Brown Kodo'),
+(0, 0, 23257, 'Swift Blue Raptor'),
+(0, 0, 35025, 'Swift Pink Hawkstrider');
