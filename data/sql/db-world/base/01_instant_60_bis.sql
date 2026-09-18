@@ -115,3 +115,31 @@ INSERT IGNORE INTO playercreateinfo_spell_custom (racemask, classmask, Spell, No
 (0, 0, 23249, 'Great Brown Kodo'),
 (0, 0, 23257, 'Swift Blue Raptor'),
 (0, 0, 35025, 'Swift Pink Hawkstrider');
+
+-- Ensure all 10 epic mounts and riding skills are injected on character creation
+DELETE FROM playercreateinfo_spell_custom WHERE Spell IN (33388, 33391, 34090, 34091, 54197, 23229, 23238, 23241, 23225, 35710, 23250, 23246, 23249, 23257, 35025);
+
+INSERT IGNORE INTO playercreateinfo_spell_custom (racemask, classmask, Spell, Note)
+SELECT 0, c.classmask, s.spell, 'Cross-Faction Epic Mounts & Riding'
+FROM (
+    SELECT 1 AS classmask UNION ALL SELECT 2 UNION ALL SELECT 4 UNION ALL 
+    SELECT 8 UNION ALL SELECT 16 UNION ALL SELECT 32 UNION ALL 
+    SELECT 64 UNION ALL SELECT 128 UNION ALL SELECT 256 UNION ALL SELECT 1024
+) c
+CROSS JOIN (
+    SELECT 33388 AS spell UNION ALL -- Apprentice Riding
+    SELECT 33391 UNION ALL       -- Journeyman Riding
+    SELECT 34090 UNION ALL       -- Expert Riding
+    SELECT 34091 UNION ALL       -- Artisan Riding
+    SELECT 54197 UNION ALL       -- Cold Weather Flying
+    SELECT 23229 UNION ALL       -- Swift Brown Steed
+    SELECT 23238 UNION ALL       -- Swift Brown Ram
+    SELECT 23241 UNION ALL       -- Swift Mistsaber
+    SELECT 23225 UNION ALL       -- Swift Green Mechanostrider
+    SELECT 35710 UNION ALL       -- Great Blue Elekk
+    SELECT 23250 UNION ALL       -- Swift Brown Wolf
+    SELECT 23246 UNION ALL       -- Green Skeletal Warhorse
+    SELECT 23249 UNION ALL       -- Great Brown Kodo
+    SELECT 23257 UNION ALL       -- Swift Blue Raptor
+    SELECT 35025                 -- Swift Pink Hawkstrider
+) s;
