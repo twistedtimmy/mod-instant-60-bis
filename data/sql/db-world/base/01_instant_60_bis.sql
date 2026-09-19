@@ -143,3 +143,22 @@ CROSS JOIN (
     SELECT 23257 UNION ALL       -- Swift Blue Raptor
     SELECT 35025                 -- Swift Pink Hawkstrider
 ) s;
+
+-- Every mount in the game, available to every class regardless of race/faction
+UPDATE item_template SET AllowableRace=-1, AllowableClass=-1 WHERE class=15 AND subclass=5;
+
+INSERT IGNORE INTO playercreateinfo_spell_custom (racemask, classmask, Spell, Note)
+SELECT 0, 0, m.mount_spell, CONCAT('All Mounts: ', m.name)
+FROM (
+    SELECT DISTINCT
+      CASE WHEN spelltrigger_1=6 THEN spellid_1
+           WHEN spelltrigger_2=6 THEN spellid_2
+           WHEN spelltrigger_3=6 THEN spellid_3
+           WHEN spelltrigger_4=6 THEN spellid_4
+           WHEN spelltrigger_5=6 THEN spellid_5
+      END AS mount_spell,
+      MIN(name) AS name
+    FROM item_template WHERE class=15 AND subclass=5
+    GROUP BY mount_spell
+) m
+WHERE m.mount_spell IS NOT NULL;
