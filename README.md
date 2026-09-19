@@ -20,3 +20,5 @@ An open-source custom module for **AzerothCore (3.3.5a)** that equips all new ch
 1. Clone this repository into your `azerothcore/modules/` directory.
 2. Copy `client-addon/AutoActionBars` into your client `Interface/AddOns/` folder.
 3. Configure `worldserver.conf` with the required Level 60 and money multipliers, then restart your server.
+4. Set `SkipCinematics = 2` in `worldserver.conf` to disable the character-creation intro cinematic for every class (skipped automatically once the module is built in; new-player tutorial hint popups are suppressed by the compiled hook itself, no config needed).
+5. Recompile the worldserver (`docker compose build ac-worldserver` or your platform's equivalent) so the compiled `OnPlayerCreate` hook in `src/ModInstant60Bis.cpp` is included in the binary - the SQL/addon alone are not enough, this module relies on compiled code for gear auto-equip, action bar filling, and tutorial suppression.

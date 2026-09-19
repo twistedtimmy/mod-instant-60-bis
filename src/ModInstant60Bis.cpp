@@ -4,6 +4,8 @@
 #include "SpellMgr.h"
 #include "SpellInfo.h"
 #include "SpellAuraDefines.h"
+#include "WorldSession.h"
+#include "Common.h"
 #include <vector>
 
 // Every character spawns with its BiS kit already sitting in playercreateinfo_item,
@@ -92,6 +94,16 @@ public:
         size_t maxSlots = sizeof(fillableSlots) / sizeof(fillableSlots[0]);
         for (size_t i = 0; i < spellsToPlace.size() && i < maxSlots; ++i)
             player->addActionButton(fillableSlots[i], spellsToPlace[i], ACTION_BUTTON_SPELL);
+
+        // Suppress every "new player" tutorial hint popup (bags, action bar, quest
+        // log, etc.) by marking all 256 tutorial flag bits as already-seen. These
+        // are stored per account, not per character, so this silences them for
+        // every character on the account, not just this one.
+        if (WorldSession* session = player->GetSession())
+        {
+            for (uint8 i = 0; i < MAX_ACCOUNT_TUTORIAL_VALUES; ++i)
+                session->SetTutorialInt(i, 0xFFFFFFFF);
+        }
 
         // OnPlayerCreate fires after the character has already been saved once and
         // the Player object is about to be destroyed with no further save - every
