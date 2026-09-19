@@ -42,6 +42,16 @@ public:
             if (equipSlot == NULL_SLOT)
                 continue;
 
+            // Don't fight over a slot that already holds an epic+ item from an
+            // earlier iteration this pass (e.g. two competing weapon options) -
+            // first one found wins, rather than flip-flopping between them.
+            if (Item* current = player->GetItemByPos(INVENTORY_SLOT_BAG_0, equipSlot))
+            {
+                ItemTemplate const* currentProto = current->GetTemplate();
+                if (currentProto && currentProto->Quality >= ITEM_QUALITY_EPIC)
+                    continue;
+            }
+
             uint16 dest = ((INVENTORY_SLOT_BAG_0 << 8) | equipSlot);
             if (dest == item->GetPos())
                 continue;
@@ -79,6 +89,12 @@ public:
         size_t maxSlots = sizeof(fillableSlots) / sizeof(fillableSlots[0]);
         for (size_t i = 0; i < spellsToPlace.size() && i < maxSlots; ++i)
             player->addActionButton(fillableSlots[i], spellsToPlace[i], ACTION_BUTTON_SPELL);
+
+        // OnPlayerCreate fires after the character has already been saved once and
+        // the Player object is about to be destroyed with no further save - every
+        // change made above only ever existed in memory and would otherwise be
+        // silently lost. This is the save that actually makes it stick.
+        player->SaveToDB(false, false);
     }
 };
 
