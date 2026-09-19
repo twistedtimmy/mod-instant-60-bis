@@ -228,3 +228,8 @@ CROSS JOIN (
     SELECT 22443                 -- Cryptstalker Wristguards (Wrist)
 ) i
 WHERE p.class = 3;
+
+-- Audit found Priest was missing a Back/Cloak item entirely (every other class
+-- had one). Every other class's item list was cross-checked and verified real.
+INSERT IGNORE INTO playercreateinfo_item (race, class, itemid, amount)
+SELECT race, 5, 23050, 1 FROM playercreateinfo WHERE class = 5;
