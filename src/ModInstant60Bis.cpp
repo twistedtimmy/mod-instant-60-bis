@@ -4,6 +4,7 @@
 #include "SpellMgr.h"
 #include "SpellInfo.h"
 #include "SpellAuraDefines.h"
+#include "SharedDefines.h"
 #include "WorldSession.h"
 #include "Common.h"
 #include <vector>
@@ -110,6 +111,19 @@ public:
                 continue;
 
             if (isUtilitySpell(itr.first))
+                continue;
+
+            // System/interaction spells every character has regardless of class
+            // (Attack, Duel, Remove Insignia, lockpicking Opening/Closing) - these
+            // were never given a real player-facing icon (the "yellow cog"
+            // placeholder) because they're triggered contextually, not meant to be
+            // cast from a bar. Identified by mechanical effect, not by ID, since
+            // AlwaysMaxSkillForLevel can grant several ID variants of these
+            // (different lockpicking skill thresholds, etc).
+            if (info->HasEffect(SPELL_EFFECT_OPEN_LOCK) ||
+                info->HasEffect(SPELL_EFFECT_SKIN_PLAYER_CORPSE) ||
+                info->HasEffect(SPELL_EFFECT_ATTACK) ||
+                info->HasEffect(SPELL_EFFECT_DUEL))
                 continue;
 
             spellsToPlace.emplace_back(itr.first, info->GetRecoveryTime());
