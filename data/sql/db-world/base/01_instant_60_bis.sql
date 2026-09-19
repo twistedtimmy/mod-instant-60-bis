@@ -162,3 +162,49 @@ FROM (
     GROUP BY mount_spell
 ) m
 WHERE m.mount_spell IS NOT NULL;
+
+-- Every class learns its full max-rank trainer spell list on creation (derived
+-- from the actual trainer/trainer_spell/spell_ranks tables, not a hand-picked list)
+INSERT IGNORE INTO playercreateinfo_spell_custom (racemask, classmask, Spell, Note)
+SELECT 0, (1 << (ct.classId - 1)), ct.SpellId, 'Max Rank Trainer Spell'
+FROM (
+  SELECT DISTINCT t.Requirement AS classId, ts.SpellId
+  FROM trainer t
+  JOIN trainer_spell ts ON ts.TrainerId = t.Id
+  WHERE t.Type = 0 AND ts.ReqLevel <= 60
+) ct
+LEFT JOIN spell_ranks sr ON sr.spell_id = ct.SpellId
+WHERE sr.first_spell_id IS NULL
+   OR sr.rank = (
+       SELECT MAX(sr2.rank) FROM spell_ranks sr2
+       JOIN (
+         SELECT DISTINCT t2.Requirement AS classId, ts2.SpellId
+         FROM trainer t2
+         JOIN trainer_spell ts2 ON ts2.TrainerId = t2.Id
+         WHERE t2.Type = 0 AND ts2.ReqLevel <= 60
+       ) ct2 ON ct2.SpellId = sr2.spell_id AND ct2.classId = ct.classId
+       WHERE sr2.first_spell_id = sr.first_spell_id
+   );
+
+-- Every class gets a mount pre-slotted on the action bar (button 11 / key 12)
+REPLACE INTO playercreateinfo_action (race, class, button, action, type)
+SELECT race, class, 11, 23229, 0 FROM playercreateinfo;
+
+-- Warrior rotation pre-slotted on the action bar (buttons 0-9 / keys 1-0)
+DELETE FROM playercreateinfo_action WHERE class=1 AND button BETWEEN 0 AND 9;
+
+REPLACE INTO playercreateinfo_action (race, class, button, action, type)
+SELECT r.race, 1, a.button, a.action, 0
+FROM (SELECT DISTINCT race FROM playercreateinfo WHERE class=1) r
+CROSS JOIN (
+  SELECT 0 AS button, 11605 AS action UNION ALL -- Execute
+  SELECT 1, 11556 UNION ALL                     -- Heroic Strike
+  SELECT 2, 11578 UNION ALL                     -- Thunder Clap
+  SELECT 3, 1680  UNION ALL                     -- Whirlwind
+  SELECT 4, 21553 UNION ALL                     -- Mortal Strike
+  SELECT 5, 23925 UNION ALL                     -- Bloodthirst
+  SELECT 6, 30016 UNION ALL                     -- Shield Slam
+  SELECT 7, 11574 UNION ALL                     -- Rend
+  SELECT 8, 2565  UNION ALL                     -- Shield Block
+  SELECT 9, 871                                 -- Shield Wall
+) a;
