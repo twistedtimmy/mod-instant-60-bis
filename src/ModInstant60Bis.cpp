@@ -1,6 +1,10 @@
 #include "ScriptMgr.h"
 #include "Player.h"
 #include "Item.h"
+#include "SpellMgr.h"
+#include "SpellInfo.h"
+#include "SpellAuraDefines.h"
+#include <vector>
 
 // Every character spawns with its BiS kit already sitting in playercreateinfo_item,
 // but Blizzard's client hardcodes level-1 starter items (robe/pants/boots/weapon)
@@ -9,6 +13,14 @@
 // logic (the same one used when a player double-clicks an item) over every item
 // still sitting in the backpack right after creation, so anything epic+ takes over
 // its equip slot immediately - no client addon, no login required.
+//
+// It also fills every action bar the client always shows regardless of stance or
+// form - the main bar (slots 0-10, slot 11 is reserved for the single mount button
+// already set via playercreateinfo_action) plus the four fixed multi-bars
+// (72-119) - with every spell the character actually knows, skipping passives and
+// skipping mount spells (there can be 200+ of those; one is plenty for a button).
+// Slots 12-71 are stance/shapeshift pages that only render while in that specific
+// stance, so they're deliberately left alone.
 class ModInstant60BisPlayerScript : public PlayerScript
 {
 public:
@@ -36,6 +48,37 @@ public:
 
             player->SwapItem(item->GetPos(), dest);
         }
+
+        static const uint8 fillableSlots[] = {
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+            72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,
+            84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+            96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107,
+            108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119
+        };
+
+        for (uint8 slot : fillableSlots)
+            player->removeActionButton(slot);
+
+        std::vector<uint32> spellsToPlace;
+        for (auto const& itr : player->GetSpellMap())
+        {
+            if (!itr.second->Active)
+                continue;
+
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(itr.first);
+            if (!info || info->IsPassive())
+                continue;
+
+            if (info->HasAura(SPELL_AURA_MOUNTED))
+                continue;
+
+            spellsToPlace.push_back(itr.first);
+        }
+
+        size_t maxSlots = sizeof(fillableSlots) / sizeof(fillableSlots[0]);
+        for (size_t i = 0; i < spellsToPlace.size() && i < maxSlots; ++i)
+            player->addActionButton(fillableSlots[i], spellsToPlace[i], ACTION_BUTTON_SPELL);
     }
 };
 
