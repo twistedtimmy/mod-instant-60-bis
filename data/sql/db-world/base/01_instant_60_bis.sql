@@ -233,3 +233,14 @@ WHERE p.class = 3;
 -- had one). Every other class's item list was cross-checked and verified real.
 INSERT IGNORE INTO playercreateinfo_item (race, class, itemid, amount)
 SELECT race, 5, 23050, 1 FROM playercreateinfo WHERE class = 5;
+
+-- All characters spawn in Shattrath City (Outland) by default regardless of
+-- race/class, instead of their normal racial starting zone. Coordinates are
+-- the real, verified Shattrath entry sourced from game_tele (the same table
+-- backing the .tele GM command).
+UPDATE playercreateinfo
+SET map = 530,
+    position_x = -1838.16,
+    position_y = 5301.79,
+    position_z = -12.428,
+    orientation = 5.9517;
