@@ -208,3 +208,23 @@ CROSS JOIN (
   SELECT 8, 2565  UNION ALL                     -- Shield Block
   SELECT 9, 871                                 -- Shield Wall
 ) a;
+
+-- Hunter: the earlier "Cryptstalker set" IDs (22377-22380) were wrong - they're
+-- actually unrelated low-level rare/epic quest-reward weapons, not the real
+-- armor set, so Hunters spawned nearly naked. Replaced with the verified real
+-- Cryptstalker Naxxramas set found by name in item_template.
+DELETE FROM playercreateinfo_item WHERE class=3 AND itemid IN (22377, 22378, 22379, 22380);
+
+INSERT IGNORE INTO playercreateinfo_item (race, class, itemid, amount)
+SELECT p.race, 3, i.id, 1
+FROM playercreateinfo p
+CROSS JOIN (
+    SELECT 22436 AS id UNION ALL -- Cryptstalker Tunic (Chest)
+    SELECT 22437 UNION ALL       -- Cryptstalker Legguards (Legs)
+    SELECT 22439 UNION ALL       -- Cryptstalker Spaulders (Shoulder)
+    SELECT 22440 UNION ALL       -- Cryptstalker Boots (Feet)
+    SELECT 22441 UNION ALL       -- Cryptstalker Handguards (Hands)
+    SELECT 22442 UNION ALL       -- Cryptstalker Girdle (Waist)
+    SELECT 22443                 -- Cryptstalker Wristguards (Wrist)
+) i
+WHERE p.class = 3;
