@@ -123,7 +123,25 @@ public:
             if (info->HasEffect(SPELL_EFFECT_OPEN_LOCK) ||
                 info->HasEffect(SPELL_EFFECT_SKIN_PLAYER_CORPSE) ||
                 info->HasEffect(SPELL_EFFECT_ATTACK) ||
-                info->HasEffect(SPELL_EFFECT_DUEL))
+                info->HasEffect(SPELL_EFFECT_DUEL) ||
+                info->HasEffect(SPELL_EFFECT_TALENT_SPEC_SELECT)) // Activate Primary/Secondary Spec
+                continue;
+
+            if (itr.first == 7267) // Grovel - real spell, but not useful on an auto-filled bar
+                continue;
+
+            // Skip anything that consumes a reagent - not something you want an
+            // action bar auto-filled with, since running out silently breaks it.
+            bool needsReagent = false;
+            for (int32 reagent : info->Reagent)
+            {
+                if (reagent > 0)
+                {
+                    needsReagent = true;
+                    break;
+                }
+            }
+            if (needsReagent)
                 continue;
 
             spellsToPlace.emplace_back(itr.first, info->GetRecoveryTime());
