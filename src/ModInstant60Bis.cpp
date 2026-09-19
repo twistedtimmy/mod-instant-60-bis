@@ -7,6 +7,8 @@
 #include "WorldSession.h"
 #include "Common.h"
 #include <vector>
+#include <algorithm>
+#include <utility>
 
 // Every character spawns with its BiS kit already sitting in playercreateinfo_item,
 // but Blizzard's client hardcodes level-1 starter items (robe/pants/boots/weapon)
@@ -75,7 +77,26 @@ public:
         for (uint8 slot : fillableSlots)
             player->removeActionButton(slot);
 
-        std::vector<uint32> spellsToPlace;
+        // These are the universal weapon/armor proficiency and riding-skill spells
+        // granted to every class - they exist only to unlock permission to use gear
+        // or ride mounts, Blizzard never gave them a real icon (they render as a
+        // generic gear/cog placeholder), and they were never meant to sit on an
+        // action bar. Excluded outright rather than merely deprioritized.
+        static const uint32 utilitySpells[] = {
+            750, 8737, 9078,                                            // armor
+            196, 197, 198, 199, 201, 202, 1180, 227, 15590,             // melee weapons
+            264, 5011, 266, 2567, 5009, 674,                            // ranged/dual wield
+            33388, 33391, 34090, 34091, 54197                          // riding
+        };
+        auto isUtilitySpell = [](uint32 spellId)
+        {
+            for (uint32 id : utilitySpells)
+                if (id == spellId)
+                    return true;
+            return false;
+        };
+
+        std::vector<std::pair<uint32, uint32>> spellsToPlace; // spellId, cooldownMs
         for (auto const& itr : player->GetSpellMap())
         {
             if (!itr.second->Active)
@@ -88,12 +109,28 @@ public:
             if (info->HasAura(SPELL_AURA_MOUNTED))
                 continue;
 
-            spellsToPlace.push_back(itr.first);
+            if (isUtilitySpell(itr.first))
+                continue;
+
+            spellsToPlace.emplace_back(itr.first, info->GetRecoveryTime());
         }
+
+        // Short/no-cooldown spells (the spam-every-fight rotation abilities) fill
+        // the main bar first; long-cooldown and situational spells spill into the
+        // overflow bars.
+        std::sort(spellsToPlace.begin(), spellsToPlace.end(),
+            [](std::pair<uint32, uint32> const& a, std::pair<uint32, uint32> const& b)
+            {
+                return a.second < b.second;
+            });
 
         size_t maxSlots = sizeof(fillableSlots) / sizeof(fillableSlots[0]);
         for (size_t i = 0; i < spellsToPlace.size() && i < maxSlots; ++i)
-            player->addActionButton(fillableSlots[i], spellsToPlace[i], ACTION_BUTTON_SPELL);
+            player->addActionButton(fillableSlots[i], spellsToPlace[i].first, ACTION_BUTTON_SPELL);
+
+        // Belt-and-suspenders: make sure the mount button on the main bar survives
+        // regardless of anything above.
+        player->addActionButton(11, 23229, ACTION_BUTTON_SPELL);
 
         // Suppress every "new player" tutorial hint popup (bags, action bar, quest
         // log, etc.) by marking all 256 tutorial flag bits as already-seen. These
