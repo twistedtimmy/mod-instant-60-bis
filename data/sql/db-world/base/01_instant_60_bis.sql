@@ -244,3 +244,11 @@ SET map = 530,
     position_y = 5301.79,
     position_z = -12.428,
     orientation = 5.9517;
+
+-- The Hearthstone tooltip ("Returns you to X") reads the character's stored
+-- home-bind AREA ID, which is separate from the actual teleport map/position -
+-- it was left at each race's original zone even after the spawn point moved
+-- to Shattrath, so the teleport worked but the tooltip still said the old
+-- zone name. 3703 is Shattrath City's real area ID (verified via the
+-- Shattrath graveyard's GhostZone entry in game_graveyard/graveyard_zone).
+UPDATE playercreateinfo SET zone = 3703;
