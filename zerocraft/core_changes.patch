@@ -1,0 +1,164 @@
+diff --git a/src/server/apps/worldserver/worldserver.conf.dist b/src/server/apps/worldserver/worldserver.conf.dist
+index e1ad3744b..3d18d70e0 100644
+--- a/src/server/apps/worldserver/worldserver.conf.dist
++++ b/src/server/apps/worldserver/worldserver.conf.dist
+@@ -2059,7 +2059,7 @@ CharacterCreating.MinLevelForHeroicCharacter = 55
+ #        Range:       1-MaxPlayerLevel
+ #        Default:     1
+ 
+-StartPlayerLevel = 1
++StartPlayerLevel = 60
+ 
+ #
+ #    StartHeroicPlayerLevel
+@@ -2122,7 +2122,7 @@ EnablePlayerSettings = 0
+ #        Range:       1-255
+ #        Default:     80
+ 
+-MaxPlayerLevel = 80
++MaxPlayerLevel = 60
+ 
+ #
+ #    MinDualSpecLevel
+diff --git a/src/server/game/Entities/Player/Player.cpp b/src/server/game/Entities/Player/Player.cpp
+index 453fe7492..2424e26e4 100644
+--- a/src/server/game/Entities/Player/Player.cpp
++++ b/src/server/game/Entities/Player/Player.cpp
+@@ -11026,6 +11026,8 @@ bool Player::BuyItemFromVendorSlot(ObjectGuid vendorguid, uint32 vendorslot, uin
+ 
+         // reputation discount
+         price = uint32(std::floor(price * GetReputationPriceDiscount(creature)));
++        if (creature->GetEntry() >= 911170 && creature->GetEntry() <= 911179)   // ZeroCraft: master crafters are free
++            price = 0;
+ 
+         if (!HasEnoughMoney(price))
+         {
+diff --git a/src/server/game/Entities/Player/PlayerStorage.cpp b/src/server/game/Entities/Player/PlayerStorage.cpp
+index 2c39287cd..04d96742b 100644
+--- a/src/server/game/Entities/Player/PlayerStorage.cpp
++++ b/src/server/game/Entities/Player/PlayerStorage.cpp
+@@ -199,10 +199,10 @@ uint8 Player::FindEquipSlot(ItemTemplate const* proto, uint32 slot, bool swap) c
+             break;
+         case INVTYPE_2HWEAPON:
+             slots[0] = EQUIPMENT_SLOT_MAINHAND;
+-            if (CanDualWield() && CanTitanGrip() && proto->SubClass != ITEM_SUBCLASS_WEAPON_POLEARM && proto->SubClass != ITEM_SUBCLASS_WEAPON_STAFF && proto->SubClass != ITEM_SUBCLASS_WEAPON_FISHING_POLE)
++            if (CanDualWield() && CanTitanGrip() && proto->SubClass != ITEM_SUBCLASS_WEAPON_POLEARM && proto->SubClass != ITEM_SUBCLASS_WEAPON_FISHING_POLE)
+                 if (Item* mhWeapon = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
+                     if (ItemTemplate const* mhWeaponProto = mhWeapon->GetTemplate())
+-                        if (mhWeaponProto->SubClass != ITEM_SUBCLASS_WEAPON_POLEARM && mhWeaponProto->SubClass != ITEM_SUBCLASS_WEAPON_STAFF && mhWeaponProto->SubClass != ITEM_SUBCLASS_WEAPON_FISHING_POLE)
++                        if (mhWeaponProto->SubClass != ITEM_SUBCLASS_WEAPON_POLEARM && mhWeaponProto->SubClass != ITEM_SUBCLASS_WEAPON_FISHING_POLE)
+                             slots[1] = EQUIPMENT_SLOT_OFFHAND;
+             break;
+         case INVTYPE_TABARD:
+@@ -2021,7 +2021,7 @@ InventoryResult Player::CanEquipItem(uint8 slot, uint16& dest, Item* pItem, bool
+                 if (Item* mhWeapon = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
+                     if (ItemTemplate const* mhWeaponProto = mhWeapon->GetTemplate())
+                         if (mhWeaponProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM ||
+-                            mhWeaponProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF ||
++                            (mhWeaponProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF && !CanTitanGrip()) || // ZeroCraft: Titan-gripped staves
+                             mhWeaponProto->SubClass == ITEM_SUBCLASS_WEAPON_FISHING_POLE)
+                             return EQUIP_ERR_CANT_EQUIP_WITH_TWOHANDED;
+ 
+@@ -2040,7 +2040,7 @@ InventoryResult Player::CanEquipItem(uint8 slot, uint16& dest, Item* pItem, bool
+                 else if (eslot != EQUIPMENT_SLOT_MAINHAND)
+                     return EQUIP_ERR_ITEM_CANT_BE_EQUIPPED;
+ 
+-                if (!CanTitanGrip() || (pProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM || pProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF || pProto->SubClass == ITEM_SUBCLASS_WEAPON_FISHING_POLE))
++                if (!CanTitanGrip() || (pProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM || pProto->SubClass == ITEM_SUBCLASS_WEAPON_FISHING_POLE))
+                 {
+                     // offhand item must can be stored in inventory for offhand item and it also must be unequipped
+                     Item* offItem = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
+diff --git a/src/server/game/Entities/Unit/Unit.cpp b/src/server/game/Entities/Unit/Unit.cpp
+index 5b73fdf37..3d2cac3f8 100644
+--- a/src/server/game/Entities/Unit/Unit.cpp
++++ b/src/server/game/Entities/Unit/Unit.cpp
+@@ -6863,6 +6863,10 @@ ReputationRank Unit::GetReactionTo(Unit const* target, bool checkOriginalFaction
+                 // same group - checks dependant only on our faction - skip FFA_PVP for example
+                 if (selfPlayerOwner->IsInRaidWith(targetPlayerOwner))
+                     return REP_FRIENDLY; // return true to allow config option AllowTwoSide.Interaction.Group to work
++
++                // ZeroCraft: guildmates are always friends (everyone else is free-for-all hostile)
++                if (selfPlayerOwner->GetGuildId() && selfPlayerOwner->GetGuildId() == targetPlayerOwner->GetGuildId())
++                    return REP_FRIENDLY;
+                 // however client seems to allow mixed group parties, because in 13850 client it works like:
+                 // return GetFactionReactionTo(GetFactionTemplateEntry(), target);
+             }
+diff --git a/src/server/game/Guilds/Guild.cpp b/src/server/game/Guilds/Guild.cpp
+index b1f8b7654..a9df96980 100644
+--- a/src/server/game/Guilds/Guild.cpp
++++ b/src/server/game/Guilds/Guild.cpp
+@@ -295,6 +295,8 @@ void Guild::RankInfo::CreateMissingTabsIfNeeded(uint8 tabs, CharacterDatabaseTra
+         rightsAndSlots.SetTabId(i);
+         if (m_rankId == GR_GUILDMASTER)
+             rightsAndSlots.SetGuildMasterValues();
++        else   // ZeroCraft: every member may see the guild vault and put things in by default
++            rightsAndSlots.SetRights(GUILD_BANK_RIGHT_VIEW_TAB | GUILD_BANK_RIGHT_PUT_ITEM);
+ 
+         if (logOnCreate)
+             LOG_ERROR("guild", "Guild {} has broken Tab {} for rank {}. Created default tab.", m_guildId, i, m_rankId);
+diff --git a/src/server/game/Handlers/ItemHandler.cpp b/src/server/game/Handlers/ItemHandler.cpp
+index 93430dbe9..461779a34 100644
+--- a/src/server/game/Handlers/ItemHandler.cpp
++++ b/src/server/game/Handlers/ItemHandler.cpp
+@@ -901,6 +901,8 @@ void WorldSession::SendListInventory(ObjectGuid vendorGuid, uint32 vendorEntry)
+     data << uint8(count);
+ 
+     float discountMod = _player->GetReputationPriceDiscount(vendor);
++    if (vendor->GetEntry() >= 911170 && vendor->GetEntry() <= 911179)   // ZeroCraft: master crafters give their wares away
++        discountMod = 0.0f;
+ 
+     for (uint8 slot = 0; slot < itemCount; ++slot)
+     {
+diff --git a/src/server/game/Handlers/TaxiHandler.cpp b/src/server/game/Handlers/TaxiHandler.cpp
+index a0dcd7edb..50f0f5779 100644
+--- a/src/server/game/Handlers/TaxiHandler.cpp
++++ b/src/server/game/Handlers/TaxiHandler.cpp
+@@ -52,7 +52,9 @@ void WorldSession::SendTaxiStatus(ObjectGuid guid)
+ 
+     WorldPacket data(SMSG_TAXINODE_STATUS, 9);
+     data << guid;
+-    data << uint8(player->m_taxi.IsTaximaskNodeKnown(nearest) ? 1 : 0);
++    // ZeroCraft: flight points belong to guilds, not to what you've discovered - always "known",
++    // so clicking a Flight Master opens their talk menu straight away (not the discovery screen)
++    data << uint8(1);
+     SendPacket(&data);
+     LOG_DEBUG("network", "WORLD: Sent SMSG_TAXINODE_STATUS");
+ }
+diff --git a/src/server/shared/DataStores/DBCStructure.h b/src/server/shared/DataStores/DBCStructure.h
+index 3ebac7eb9..9a79a132f 100644
+--- a/src/server/shared/DataStores/DBCStructure.h
++++ b/src/server/shared/DataStores/DBCStructure.h
+@@ -739,13 +739,13 @@ struct CreatureDisplayInfoExtraEntry
+ {
+     //uint32 ID;                                            // 0
+     uint32 DisplayRaceID;                                   // 1
+-    //uint32 DisplaySexID;                                  // 2
+-    //uint32 SkinID;                                        // 3
+-    //uint32 FaceID;                                        // 4
+-    //uint32 HairStyleID;                                   // 5
+-    //uint32 HairColorID;                                   // 6
+-    //uint32 FacialHairID;                                  // 7
+-    //uint32 NPCItemDisplay[11];                            // 8-18
++    uint32 DisplaySexID;                                    // 2   (ZeroCraft: loaded for guild tabards on NPCs)
++    uint32 SkinID;                                          // 3
++    uint32 FaceID;                                          // 4
++    uint32 HairStyleID;                                     // 5
++    uint32 HairColorID;                                     // 6
++    uint32 FacialHairID;                                    // 7
++    uint32 NPCItemDisplay[11];                              // 8-18
+     //uint32 Flags;                                         // 19
+     //char const* BakeName;                                 // 20
+ };
+diff --git a/src/server/shared/DataStores/DBCfmt.h b/src/server/shared/DataStores/DBCfmt.h
+index e3af013ca..df8d7fcf5 100644
+--- a/src/server/shared/DataStores/DBCfmt.h
++++ b/src/server/shared/DataStores/DBCfmt.h
+@@ -36,7 +36,7 @@ char constexpr ChrRacesEntryfmt[] = "niixiixixxxxiissssssssssssssssxxxxxxxxxxxxx
+ char constexpr CinematicCameraEntryfmt[] = "nsiffff";
+ char constexpr CinematicSequencesEntryfmt[] = "nxixxxxxxx";
+ char constexpr CreatureDisplayInfofmt[] = "nixifxxxxxxxxxxx";
+-char constexpr CreatureDisplayInfoExtrafmt[] = "dixxxxxxxxxxxxxxxxxxx";
++char constexpr CreatureDisplayInfoExtrafmt[] = "diiiiiiiiiiiiiiiiiixx";
+ char constexpr CreatureFamilyfmt[] = "nfifiiiiixssssssssssssssssxx";
+ char constexpr CreatureModelDatafmt[] = "nixxfxxxxxxxxxfffxxxxxxxxxxx";
+ char constexpr CreatureSpellDatafmt[] = "niiiixxxx";

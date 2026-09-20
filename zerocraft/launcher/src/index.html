@@ -1,0 +1,99 @@
+<!doctype html><html><head><meta charset="utf-8"><title>ZeroCraft Launcher</title>
+<link rel="stylesheet" href="style.css"></head>
+<body>
+<div id="scene">
+  <svg class="mountains" viewBox="0 0 1280 720" preserveAspectRatio="xMidYMax slice">
+    <defs>
+      <linearGradient id="m1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8a5a4a"/><stop offset="1" stop-color="#3a2420"/></linearGradient>
+      <linearGradient id="m2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5a3a30"/><stop offset="1" stop-color="#22140f"/></linearGradient>
+      <linearGradient id="m3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2e1c14"/><stop offset="1" stop-color="#120a07"/></linearGradient>
+      <radialGradient id="glow" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffb347" stop-opacity=".9"/><stop offset="1" stop-color="#ff7a1a" stop-opacity="0"/></radialGradient>
+    </defs>
+    <path fill="url(#m1)" opacity=".75" d="M0 430 L120 360 L230 400 L380 250 L470 330 L560 290 L700 150 L820 300 L930 260 L1040 330 L1150 280 L1280 340 L1280 720 L0 720Z"/>
+    <path fill="url(#m2)" d="M0 500 L90 450 L200 480 L330 390 L440 460 L560 420 L680 470 L800 400 L930 470 L1060 420 L1180 470 L1280 440 L1280 720 L0 720Z"/>
+    <path fill="url(#m3)" d="M0 590 L160 560 L300 600 L470 555 L640 600 L800 565 L960 610 L1120 570 L1280 600 L1280 720 L0 720Z"/>
+    <ellipse cx="640" cy="640" rx="170" ry="26" fill="url(#glow)"/>
+    <ellipse cx="640" cy="642" rx="120" ry="14" fill="none" stroke="#ffb347" stroke-width="3" opacity=".8"/>
+  </svg>
+  <div class="fog"></div>
+</div>
+
+<div id="titlebar"><span class="tb-title">ZeroCraft Launcher</span>
+  <button onclick="zc.min()">&#8211;</button><button onclick="zc.close()">&#10005;</button></div>
+
+<!-- LOGIN -->
+<section id="login" class="view">
+  <div class="login-card">
+    <img class="emblem" src="emblem.svg">
+    <h1>LOGIN TO YOUR<br>ZEROCRAFT ACCOUNT</h1>
+    <p class="sub">Use your game account.</p>
+    <input id="acc" placeholder="Account name" autocomplete="off">
+    <input id="pw" type="password" placeholder="Password">
+    <label class="check"><input type="checkbox" id="remember" checked> Remember me (fills in the game's login screen for you)</label>
+    <button id="btnLogin" class="gold">CONTINUE</button>
+    <p class="fine">Your password is encrypted on this PC and only used to log you into the game.</p>
+  </div>
+  <div class="foot">Terms &amp; Conditions &nbsp;&nbsp; Privacy Policy &nbsp;&nbsp; <span class="ver"></span></div>
+</section>
+
+<!-- HOME -->
+<section id="home" class="view hidden">
+  <nav>
+    <a class="active" data-tab="home">&#8962; Home</a>
+    <a data-tab="news">News <span class="pill">NEW</span></a>
+    <div class="brand"><img src="emblem.svg"><span>ZEROCRAFT</span></div>
+    <a data-tab="settings">&#9881; Settings</a>
+    <a id="navLogout">&#10162; Log out</a>
+  </nav>
+
+  <div id="tab-home" class="tab">
+    <div class="hero">
+      <h2>ZEROCRAFT</h2>
+      <p class="tag">Guilds. Territory. Tribute.<br>Hold the chokepoints. Deploy your army. Build your network.</p>
+      <div class="playrow">
+        <button id="btnMain" class="play">
+          <span class="big" id="btnBig">CHECKING</span><span class="small" id="btnSmall">Please wait...</span>
+        </button>
+      </div>
+      <div class="progress hidden" id="prog"><div id="progBar"></div></div>
+      <div class="status" id="status"></div>
+      <div class="nodk">&#9876; No Death Knights &mdash; ZeroCraft is vanilla-style: every hero starts as a level 60 classic class.</div>
+      <button id="btnClear" class="danger">DELETE MY CHARACTERS</button> <span id="clearMsg" class="clearMsg"></span>
+      <div class="devrow">
+        <button id="btnUpdate" class="dev">RUN <span id="pUpdate">C:\azerothcore\update.bat</span></button>
+        <button id="btnRestart" class="dev">RESTART SERVER</button>
+        <button id="btnCache" class="dev">DELETE <span id="pCache">C:\Games\WoW335\ChromieCraft_3.3.5a\Cache</span></button>
+        <button id="btnPatch" class="dev">SWAP IN NEW PATCH-Y</button>
+      </div>
+      <span id="devMsg" class="clearMsg"></span>
+    </div>
+    <div class="side">
+      <div class="panel">
+        <h3>ACCOUNT</h3>
+        <div class="who"><img src="emblem.svg"><div><b id="whoName">-</b><small id="whoAuto"></small></div></div>
+      </div>
+      <div class="panel">
+        <h3>SERVER</h3>
+        <div class="who"><div class="dot"></div><div><b>ZeroCraft</b><small>Level 60 &middot; Guild warfare</small></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-news" class="tab hidden"><h4 class="newsHead">ALL NEWS</h4><div class="news big" id="newsAll"></div></div>
+
+  <div id="tab-settings" class="tab hidden">
+    <div class="settings">
+      <h3>SETTINGS</h3>
+      <label>World of Warcraft 3.3.5a folder</label>
+      <div class="row"><input id="setWow"><button id="btnPick" class="ghost">Browse</button></div>
+      <label>Update source (folder or web address)</label>
+      <input id="setSrc">
+      <label>Auto-login delay (seconds to wait for the login screen)</label>
+      <input id="setDelay" type="number" min="2" max="30">
+      <button id="btnSave" class="gold small">SAVE</button> <span id="saved" class="savedMsg"></span>
+
+    </div>
+  </div>
+</section>
+<script src="renderer.js"></script>
+</body></html>

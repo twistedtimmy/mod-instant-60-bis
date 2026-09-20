@@ -1,0 +1,13 @@
+version=31
+file=Interface/AddOns/ZeroCraft/ZeroCraft.toc
+file=Interface/AddOns/ZeroCraft/ZeroCraft.lua
+file=Interface/AddOns/ZeroCraft/ZeroCraftWarData.lua
+file=Interface/AddOns/ZeroCraft/ZeroCraftWar.lua
+file=Data/enUS/realmlist.wtf
+file=Data/patch-Z.MPQ
+remove=Interface/AddOns/AutoActionBars
+news=Pre-alpha|Welcome to ZeroCraft|Everyone starts at 60. Deploy guards, heroes and flight masters, and build your guild's network.
+news=Pre-alpha|Dungeons drop armies|Every boss now drops deployable NPCs instead of gear. Heroes are legendary.
+news=Pre-alpha|Flight networks|Flight points only exist where your guild holds a Flight Master.
+news=Pre-alpha|Commander's Banner|Point, click, and your army marches - on foot or from the back of a drake.
+news=Pre-alpha|Two banners|Red banner moves the NPC you target. Blue banner moves your whole army.

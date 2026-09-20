@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 220">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe9a8"/><stop offset=".45" stop-color="#e0a93e"/><stop offset="1" stop-color="#8a5a18"/>
+    </linearGradient>
+    <linearGradient id="r" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b3261e"/><stop offset="1" stop-color="#5c0f0b"/>
+    </linearGradient>
+  </defs>
+  <!-- wings -->
+  <path d="M100 70 C70 40 30 38 6 60 C34 58 52 70 64 92 C44 80 24 82 10 96 C40 94 58 104 72 122 Z" fill="url(#g)" opacity=".92"/>
+  <path d="M100 70 C130 40 170 38 194 60 C166 58 148 70 136 92 C156 80 176 82 190 96 C160 94 142 104 128 122 Z" fill="url(#g)" opacity=".92"/>
+  <!-- shield -->
+  <path d="M100 18 L152 40 L146 130 C140 168 118 192 100 204 C82 192 60 168 54 130 L48 40 Z" fill="url(#g)" stroke="#5a3a0c" stroke-width="3"/>
+  <path d="M100 32 L140 49 L135 128 C130 160 114 180 100 190 C86 180 70 160 65 128 L60 49 Z" fill="url(#r)"/>
+  <!-- the Z -->
+  <path d="M72 70 H128 V84 L92 136 H130 V150 H70 V136 L106 84 H72 Z" fill="url(#g)" stroke="#5a3a0c" stroke-width="2.5" stroke-linejoin="round"/>
+  <!-- crown points -->
+  <path d="M76 26 L86 6 L94 22 L100 0 L106 22 L114 6 L124 26 Z" fill="url(#g)" stroke="#5a3a0c" stroke-width="2"/>
+</svg>

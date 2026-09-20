@@ -1,0 +1,22 @@
+{
+  "name": "zerocraft-launcher",
+  "productName": "ZeroCraft Launcher",
+  "version": "1.2.0",
+  "description": "ZeroCraft Launcher",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win dir"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.zerocraft.launcher",
+    "productName": "ZeroCraft Launcher",
+    "directories": { "output": "dist" },
+    "files": ["src/**/*", "package.json"],
+    "win": { "target": "dir", "icon": "src/icon.ico", "signAndEditExecutable": true }
+  }
+}

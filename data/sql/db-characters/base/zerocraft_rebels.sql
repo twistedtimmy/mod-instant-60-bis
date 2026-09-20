@@ -1,0 +1,10 @@
+-- ZeroCraft: which characters are Rebels (the third side)
+CREATE TABLE IF NOT EXISTS zerocraft_rebels (guid INT UNSIGNED NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS zerocraft_pirates (guid INT UNSIGNED NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS zerocraft_packed (id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, player_guid INT UNSIGNED NOT NULL, scroll_entry INT UNSIGNED NOT NULL, entry INT UNSIGNED NOT NULL, health FLOAT NOT NULL DEFAULT 1, KEY player_scroll (player_guid, scroll_entry)) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS zerocraft_bars_cleaned (guid INT UNSIGNED NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS zerocraft_mounts_reset (guid INT UNSIGNED NOT NULL PRIMARY KEY) ENGINE=InnoDB;
