@@ -1,7 +1,7 @@
 {
   "name": "zerocraft-launcher",
   "productName": "ZeroCraft Launcher",
-  "version": "1.2.0",
+  "version": "1.4.1",
   "description": "ZeroCraft Launcher",
   "main": "src/main.js",
   "scripts": {

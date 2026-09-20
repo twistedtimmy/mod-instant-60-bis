@@ -12,7 +12,7 @@ const DEFAULTS = {
   account: '',
   password: '',          // encrypted with Windows (DPAPI) via safeStorage
   autoLogin: false,
-  loginDelay: 6,
+  loginWait: 1,          // seconds after the game window appears before the first login try
   serverPath: 'C:\\azerothcore'
 };
 function loadSettings() {
@@ -48,11 +48,11 @@ ipcMain.on('open:url', (_e, url) => shell.openExternal(url));
 ipcMain.handle('settings:get', () => {
   const s = loadSettings();
   return { wowPath: s.wowPath, updateSource: s.updateSource, account: s.account, hasPassword: !!s.password,
-           autoLogin: s.autoLogin, loginDelay: s.loginDelay, version: app.getVersion() };
+           autoLogin: s.autoLogin, loginWait: s.loginWait, version: app.getVersion() };
 });
 ipcMain.handle('settings:set', (_e, patch) => {
   const s = loadSettings();
-  for (const k of ['wowPath', 'updateSource', 'loginDelay']) if (patch[k] !== undefined) s[k] = patch[k];
+  for (const k of ['wowPath', 'updateSource', 'loginWait']) if (patch[k] !== undefined) s[k] = patch[k];
   saveSettings(s); return true;
 });
 ipcMain.handle('login:save', (_e, { account, password, autoLogin }) => {
@@ -131,38 +131,14 @@ function setAccountName(wow, account) {
   lines.push('SET accountName "' + account + '"');
   fs.writeFileSync(cfg, lines.join('\r\n') + '\r\n');
 }
-const TYPE_PASSWORD_PS = String.raw`
-$log = Join-Path $env:ZC_WOW 'zerocraft_login.log'
-function L($m) { Add-Content -Path $log -Value ((Get-Date -Format 'HH:mm:ss') + ' ' + $m) }
-Set-Content -Path $log -Value 'ZeroCraft auto-login'
-Add-Type @"
-using System; using System.Runtime.InteropServices;
-public static class ZcWin {
-  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+// The auto-login helper is a real .ps1 (src/autologin.ps1). It is copied out of the app package
+// at play time because PowerShell cannot read files inside app.asar.
+function autoLoginScript() {
+  const dest = path.join(app.getPath('userData'), 'autologin.ps1');
+  fs.writeFileSync(dest, fs.readFileSync(path.join(__dirname, 'autologin.ps1')));
+  return dest;
 }
-"@
-$p = Get-Process -Id ([int]$env:ZC_PID) -ErrorAction SilentlyContinue
-if (-not $p) { $p = Get-Process -Name Wow -ErrorAction SilentlyContinue | Select-Object -First 1 }
-if (-not $p) { L 'WoW process not found'; exit }
-$end = (Get-Date).AddSeconds(90)
-while (-not $p.HasExited -and $p.MainWindowHandle -eq 0 -and (Get-Date) -lt $end) { Start-Sleep -Milliseconds 400; $p.Refresh() }
-$h = $p.MainWindowHandle
-L ('window handle ' + $h)
-if ($h -eq 0) { L 'no WoW window'; exit }
-Start-Sleep -Seconds ([int]$env:ZC_DELAY)
-[void][ZcWin]::SetForegroundWindow($h)
-Start-Sleep -Milliseconds 300
-foreach ($ch in $env:ZC_PW.ToCharArray()) {
-  [void][ZcWin]::PostMessage($h, 0x0102, [IntPtr][int]$ch, [IntPtr]1)   # WM_CHAR
-  Start-Sleep -Milliseconds 25
-}
-Start-Sleep -Milliseconds 200
-[void][ZcWin]::PostMessage($h, 0x0100, [IntPtr]0x0D, [IntPtr]0x001C0001) # WM_KEYDOWN Enter
-[void][ZcWin]::PostMessage($h, 0x0102, [IntPtr]0x0D, [IntPtr]0x001C0001) # WM_CHAR Enter
-[void][ZcWin]::PostMessage($h, 0x0101, [IntPtr]0x0D, [IntPtr]0xC01C0001) # WM_KEYUP Enter
-L ('typed ' + $env:ZC_PW.Length + ' characters and pressed Enter')
-`;
+function loginLogPath(wow) { return path.join(wow, 'zerocraft_login.log'); }
 // ---------- patch-Y swap: delete patch-Y.MPQ, rename patch-Y.new to patch-Y.MPQ ----------
 function swapPatchY(wowPath) {
   const dir = path.join(wowPath, 'Data');
@@ -177,6 +153,13 @@ function swapPatchY(wowPath) {
   }
 }
 ipcMain.handle('dev:patch', () => swapPatchY(loadSettings().wowPath));
+// last line of the auto-login helper's log, shown under the PLAY button
+ipcMain.handle('login:log', () => {
+  try {
+    const lines = fs.readFileSync(loginLogPath(loadSettings().wowPath), 'utf8').split(/\r?\n/).filter(Boolean);
+    return lines.length ? lines[lines.length - 1].replace(/^\d\d:\d\d:\d\d\.\d\d\d\s+/, '') : '';
+  } catch { return ''; }
+});
 
 ipcMain.handle('game:play', () => {
   const s = loadSettings();
@@ -187,11 +170,15 @@ ipcMain.handle('game:play', () => {
   const game = spawn(exe, [], { cwd: s.wowPath, detached: true, stdio: 'ignore' });
   game.unref();
   const pw = decrypt(s.password);
-  if (!(s.autoLogin && pw)) fs.writeFileSync(path.join(s.wowPath, 'zerocraft_login.log'), 'auto-login skipped: autoLogin=' + s.autoLogin + ' savedPassword=' + !!pw + '\r\n');
+  if (!(s.autoLogin && pw)) fs.writeFileSync(loginLogPath(s.wowPath), 'Auto-login is off' + (s.autoLogin && !pw ? ' (no saved password - log out of the launcher and back in)' : '') + '.\r\n');
   if (s.autoLogin && pw) {
-    const ps = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', TYPE_PASSWORD_PS],
-      { detached: true, stdio: 'ignore', env: Object.assign({}, process.env, { ZC_PID: String(game.pid), ZC_DELAY: String(s.loginDelay || 6), ZC_PW: pw, ZC_WOW: s.wowPath }) });
-    ps.unref();
+    fs.writeFileSync(loginLogPath(s.wowPath), 'ZeroCraft auto-login: starting helper...\r\n');
+    // NOT detached: PowerShell exits without running anything when started with no console.
+    // windowsHide keeps its window invisible instead.
+    const ps = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', autoLoginScript()],
+      { detached: false, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: Object.assign({}, process.env, { ZC_PID: String(game.pid), ZC_WAIT: String(s.loginWait === undefined ? 1 : s.loginWait), ZC_PW: pw, ZC_WOW: s.wowPath }) });
+    ps.stderr.on('data', (d) => fs.appendFileSync(loginLogPath(s.wowPath), 'PowerShell error: ' + String(d).trim() + '\r\n'));
+    ps.on('error', (e) => fs.appendFileSync(loginLogPath(s.wowPath), 'Could not start PowerShell: ' + e.message + '\r\n'));
   }
   game.on('exit', () => { if (win) win.webContents.send('game:exit'); });
   return { ok: true };

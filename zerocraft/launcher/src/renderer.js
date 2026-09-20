@@ -36,6 +36,18 @@ async function play() {
   const r = await zc.play();
   if (r.error) { setButton('PLAY', 'Try again'); status(r.error); return; }
   state = 'playing'; setButton('PLAYING', 'World of Warcraft is running', false); status('');
+  if (settings.autoLogin && settings.hasPassword) watchLogin();
+}
+// show what the auto-login helper is doing (it writes zerocraft_login.log in the WoW folder)
+let loginWatch = null;
+function watchLogin() {
+  if (loginWatch) clearInterval(loginWatch);
+  const until = Date.now() + 120000;
+  loginWatch = setInterval(async () => {
+    const line = await zc.loginLog();
+    if (line) status(line);
+    if (Date.now() > until || state !== 'playing' || /Logged in|Gave up|Not retrying|Auto-login is off|Could not start|closed/.test(line)) { clearInterval(loginWatch); loginWatch = null; }
+  }, 700);
 }
 
 $('btnMain').onclick = async () => {
@@ -69,7 +81,7 @@ document.querySelectorAll('nav a[data-tab]').forEach(a => a.onclick = () => open
 
 $('btnPick').onclick = async () => { const p = await zc.pickWow(); if (p) $('setWow').value = p; };
 $('btnSave').onclick = async () => {
-  await zc.setSettings({ wowPath: $('setWow').value.trim(), updateSource: $('setSrc').value.trim(), loginDelay: +$('setDelay').value || 6 });
+  await zc.setSettings({ wowPath: $('setWow').value.trim(), updateSource: $('setSrc').value.trim(), loginWait: Math.max(0, +$('setDelay').value || 0) });
   settings = await zc.getSettings(); $('saved').textContent = 'Saved'; setTimeout(() => $('saved').textContent = '', 2000);
   openTab('home'); check();
 };
@@ -107,7 +119,7 @@ $('btnRestart').onclick = async () => {
 function enterHome() {
   $('whoName').textContent = settings.account || '-';
   $('whoAuto').textContent = settings.autoLogin && settings.hasPassword ? 'Automatic login on' : 'Automatic login off';
-  $('setWow').value = settings.wowPath; $('setSrc').value = settings.updateSource; $('setDelay').value = settings.loginDelay;
+  $('setWow').value = settings.wowPath; $('setSrc').value = settings.updateSource; $('setDelay').value = settings.loginWait;
   show('home'); openTab('home'); check();
 }
 
