@@ -19,5 +19,6 @@ contextBridge.exposeInMainWorld('zc', {
   devRestart: () => ipcRenderer.invoke('dev:restart'),
   play: () => ipcRenderer.invoke('game:play'),
   loginLog: () => ipcRenderer.invoke('login:log'),
-  onGameExit: (cb) => ipcRenderer.on('game:exit', () => cb())
+  onGameExit: (cb) => ipcRenderer.on('game:exit', () => cb()),
+  onLoginWatch: (cb) => ipcRenderer.on('login:watch', () => cb())
 });

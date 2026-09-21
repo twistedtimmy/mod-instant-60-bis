@@ -6,3 +6,10 @@
 ZeroCraft.lua
 ZeroCraftWarData.lua
 ZeroCraftWar.lua
+ZeroCraftBuildData.lua
+ZeroCraftMaster.lua
+ZeroCraftBags.lua
+ZeroCraftTeleData.lua
+ZeroCraftGM.lua
+ZeroCraftMarshal.lua
+ZeroCraftPlates.lua

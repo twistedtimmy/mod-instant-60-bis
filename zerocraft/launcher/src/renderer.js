@@ -60,6 +60,8 @@ $('btnMain').onclick = async () => {
   else if (state === 'nowow') openTab('settings');
 };
 zc.onGameExit(() => { state = 'play'; check(); });
+// the server was restarted and the launcher is logging the game back in
+zc.onLoginWatch(() => { state = 'playing'; setButton('PLAYING', 'Logging you back in...', false); watchLogin(); });
 zc.onProgress(({ pct, text }) => { $('progBar').style.width = pct + '%'; status(text); });
 
 $('btnLogin').onclick = async () => {

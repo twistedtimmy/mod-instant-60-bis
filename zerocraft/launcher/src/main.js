@@ -36,8 +36,17 @@ function createWindows() {
   win.once('ready-to-show', () => setTimeout(() => { if (splash) splash.close(); splash = null; win.show(); }, 1600));
 }
 app.setAppUserModelId('com.zerocraft.launcher');
-app.whenReady().then(createWindows);
-app.on('window-all-closed', () => app.quit());
+// "ZeroCraft Launcher.exe --relog": log the running game back in after a server restart.
+// If a launcher is already open, that one does the work (single instance); otherwise this
+// instance does it without showing a window and quits.
+const RELOG = process.argv.includes('--relog');
+if (!app.requestSingleInstanceLock({ relog: RELOG })) app.quit();
+app.on('second-instance', (_e, argv, _cwd, data) => {
+  if ((data && data.relog) || argv.includes('--relog')) relog();
+  else if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
+});
+app.whenReady().then(() => { if (RELOG) relog().then(() => app.quit()); else createWindows(); });
+app.on('window-all-closed', () => { if (!RELOG) app.quit(); });
 
 // ---------- window controls ----------
 ipcMain.on('win:min', () => win.minimize());
@@ -183,6 +192,44 @@ ipcMain.handle('game:play', () => {
   game.on('exit', () => { if (win) win.webContents.send('game:exit'); });
   return { ok: true };
 });
+
+// ---------- relog after a server restart ----------
+const { execFileSync } = require('child_process');
+function wowPid() {
+  try {
+    const out = execFileSync('tasklist.exe', ['/FI', 'IMAGENAME eq Wow.exe', '/FO', 'CSV', '/NH'], { windowsHide: true }).toString();
+    const m = out.match(/^"Wow\.exe","(\d+)"/m);
+    return m ? +m[1] : 0;
+  } catch { return 0; }
+}
+function runHelper(s, pw, pid, extraEnv) {
+  return new Promise((resolve) => {
+    const ps = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', autoLoginScript()],
+      { detached: false, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
+        env: Object.assign({}, process.env, { ZC_PID: String(pid), ZC_WAIT: String(s.loginWait === undefined ? 1 : s.loginWait), ZC_PW: pw, ZC_WOW: s.wowPath }, extraEnv || {}) });
+    ps.stderr.on('data', (d) => fs.appendFileSync(loginLogPath(s.wowPath), 'PowerShell error: ' + String(d).trim() + '\r\n'));
+    ps.on('error', (e) => { fs.appendFileSync(loginLogPath(s.wowPath), 'Could not start PowerShell: ' + e.message + '\r\n'); resolve(); });
+    ps.on('exit', () => resolve());
+  });
+}
+async function relog() {
+  const s = loadSettings();
+  const pw = decrypt(s.password);
+  if (!(s.autoLogin && pw)) { fs.writeFileSync(loginLogPath(s.wowPath), 'Relog skipped: no saved password in the launcher.\r\n'); return; }
+  let pid = wowPid(), fresh = false;
+  if (!pid) {
+    // the game is not running: start it like PLAY does
+    swapPatchY(s.wowPath);
+    const exe = path.join(s.wowPath, 'Wow.exe');
+    if (!fs.existsSync(exe)) return;
+    if (s.account) setAccountName(s.wowPath, s.account);
+    const game = spawn(exe, [], { cwd: s.wowPath, detached: true, stdio: 'ignore' }); game.unref();
+    pid = game.pid; fresh = true;
+  }
+  fs.writeFileSync(loginLogPath(s.wowPath), 'ZeroCraft relog: logging you back in...\r\n');
+  if (win) win.webContents.send('login:watch');
+  await runHelper(s, pw, pid, { ZC_RELOG: fresh ? '0' : '1', ZC_ENTERWORLD: '1' });
+}
 
 // ---------- dev tools ----------
 ipcMain.handle('dev:paths', () => {

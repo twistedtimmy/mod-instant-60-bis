@@ -7,6 +7,10 @@
 #   ZC_PW     the account password
 #   ZC_WOW    the WoW folder (zerocraft_login.log is written there)
 #   ZC_WAIT   seconds to wait after the game window appears before the first try (default 1)
+#   ZC_RELOG  1 = the server was just restarted under a running client: wait for the client to
+#             drop its old connection, dismiss the "disconnected" dialog, then log in again
+#   ZC_ENTERWORLD  1 = after reaching the character screen, press Enter to enter the world
+#                  with the last played character
 #
 # WoW 3.3.5a talks to the auth server on port 3724 and to the realm (world server) on 8085.
 # A connection to 8085 means "logged in and at the character screen".
@@ -80,15 +84,46 @@ if ($wait -lt 0) { $wait = 0 }
 Start-Sleep -Seconds $wait
 
 $pw = [string]$env:ZC_PW
+$relog = ($env:ZC_RELOG -eq '1')
+$enterWorld = ($env:ZC_ENTERWORLD -eq '1')
+
+# once at the character screen: optionally walk straight into the world, then finish
+function Finish($how) {
+  L ('Logged in - at the character screen' + $how + '.')
+  if ($enterWorld) {
+    Start-Sleep -Milliseconds 2500          # let the character list arrive and select the last character
+    [void][ZcWin]::SetForegroundWindow($h)
+    Press $h $VK_RETURN $SC_RETURN
+    Start-Sleep -Seconds 3
+    if (Connected $procId 8085) { L 'Entered the world.' } else { L 'Pressed Enter World but the realm connection dropped.' }
+  }
+  exit
+}
+
+if ($relog) {
+  # Never type while the client might still be in the world (Enter would open chat).
+  # Wait until its old realm connection is gone, which is when the "disconnected" dialog shows.
+  $end = (Get-Date).AddSeconds(60)
+  while ((Connected $procId 8085) -and (Get-Date) -lt $end) { Start-Sleep -Milliseconds 300 }
+  if (Connected $procId 8085) { L 'The client is still connected to a realm - not a restart? Nothing to do.'; exit }
+  Start-Sleep -Milliseconds 1500
+  [void][ZcWin]::SetForegroundWindow($h)
+  Press $h $VK_RETURN $SC_RETURN             # Okay on "You have been disconnected from the server."
+  Start-Sleep -Milliseconds 2500             # the login screen rebuilds itself after that
+  L 'Dismissed the disconnect dialog.'
+}
+
 $maxTries = 20        # about 20-25 seconds of trying
+if ($relog) { $maxTries = 90 }   # the server may still be booting
 $rejections = 0
 for ($try = 1; $try -le $maxTries; $try++) {
   if ($p.HasExited) { L 'WoW was closed.'; exit }
-  if (Connected $procId 8085) { L 'Logged in - at the character screen.'; exit }
+  if (Connected $procId 8085) { Finish '' }
   [void][ZcWin]::SetForegroundWindow($h)
   if ($try -gt 1) {
-    # dismiss any error dialog and clear whatever half-typed password is in the box
-    Press $h $VK_ESCAPE $SC_ESCAPE
+    # clear whatever half-typed password is in the box. NEVER press Escape here: on the login
+    # screen Escape is "Exit Game". If an error dialog is up, the Enter below dismisses it and
+    # the next try types into the password box.
     for ($i = 0; $i -lt ($pw.Length + 4); $i++) { Press $h $VK_BACK $SC_BACK }
   }
   TypeText $h $pw
@@ -99,22 +134,23 @@ for ($try = 1; $try -le $maxTries; $try++) {
   $auth = $false
   $deadline = (Get-Date).AddMilliseconds(1200)
   while ((Get-Date) -lt $deadline) {
-    if (Connected $procId 8085) { L ('Logged in - at the character screen (try ' + $try + ').'); exit }
+    if (Connected $procId 8085) { Finish (' (try ' + $try + ')') }
     if (Connected $procId 3724) { $auth = $true; break }
     Start-Sleep -Milliseconds 100
   }
   if (-not $auth) { Start-Sleep -Milliseconds 700; continue }   # login screen not ready yet - try again
 
   L ('Login sent (try ' + $try + '), waiting for the realm...')
-  if (WaitRealm $procId 8) { L 'Logged in - at the character screen.'; exit }
+  if (WaitRealm $procId 10) { Finish '' }
   # authenticated but not on a realm: maybe sitting on the realm list
   [void][ZcWin]::SetForegroundWindow($h)
   Press $h $VK_RETURN $SC_RETURN
-  if (WaitRealm $procId 5) { L 'Logged in - at the character screen (picked the realm).'; exit }
-  # the auth server answered but no realm followed: usually a rejected password
+  if (WaitRealm $procId 6) { Finish ' (picked the realm)' }
+  # The auth server answered but no realm followed. Right after a server restart the realm
+  # shows as offline for a little while, so try again a few times before blaming the password.
   $rejections++
-  if ($rejections -ge 2) { L 'The server rejected the password twice. Log out of the launcher and log in again with the right password. Not retrying.'; exit }
-  L 'The server did not accept the login (a half-typed password?). Trying once more.'
-  Start-Sleep -Milliseconds 500
+  if ($rejections -ge 4) { L 'Logged in to the auth server four times but never reached the realm. Either the realm is still down or the password is wrong - log out of the launcher and back in. Not retrying.'; exit }
+  L 'The realm is not accepting logins yet (or the password was refused). Trying again in 10s.'
+  Start-Sleep -Seconds 10
 }
 L ('Gave up after ' + $maxTries + ' tries. If the game loads slowly on this PC, raise the auto-login wait in Settings.')

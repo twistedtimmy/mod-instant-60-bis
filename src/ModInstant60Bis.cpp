@@ -13,6 +13,10 @@
 #include "DBCStores.h"
 #include "CombatAI.h"
 #include <unordered_set>
+#include <array>
+#include "ZeroCraftNpcVoice.h"
+
+namespace ZeroCraftTitanGrip { static void GrantSwords(Player* p); }   // defined with the rest of Titan's Grip
 #include <map>
 #include <set>
 #include "GameObject.h"
@@ -1111,15 +1115,13 @@ public:
         ZeroCraftEnchants::GiveSpares(player);
         // starter kit (kept small): 1 Builder's Scroll, 7 Guard scrolls, the Titan's Grip scrolls
         // and the legendary weapons (Flight Master scroll, banners, Recall Orders and Hearthstone come elsewhere)
-        // five different random pieces from the cool furniture pool (the ones bosses mostly drop)
-        if (QueryResult r = WorldDatabase.Query("SELECT Item FROM reference_loot_template WHERE Entry = 911110 ORDER BY RAND() LIMIT 5"))
-            do { player->AddItem((*r)[0].Get<uint32>(), 1); } while (r->NextRow());
-        player->AddItem(823, 7);   // 7 deployable Guards
-        player->AddItem(60408, 5);   // 5 Training Dummies
+        // bags hold only the master items: the gear is worn, and the two Frostmournes need Titan's Grip, granted outright
         player->AddItem(36942, 1);   // two Frostmournes...
         player->AddItem(36942, 1);
-        player->AddItem(60401, 1);   // ...and the Scroll of Titan's Grip: Swords to wield both
-        player->AddItem(60410, 1);   // Tinker's Duplicatron-9000 (never used up)
+        ZeroCraftTitanGrip::GrantSwords(player);   // ...wielded together from the first minute
+        player->AddItem(23656, 1);   // Master Builder's Tome
+        player->AddItem(28099, 1);   // Master Recruiter's Orders
+        player->AddItem(23701, 1);   // Master Marshal's Banner
         // the guild didn't exist yet during OnPlayerLogin on the very first login
         ObjectGuid tguid = player->GetGUID();
         player->m_Events.AddEventAtOffset([player, tguid]()
@@ -1140,13 +1142,7 @@ public:
     // it has to be re-applied on every login, not just at creation.
     void OnPlayerLogin(Player* player) override
     {
-        GrantOnce(player, 65000);   // NPC: Potion Master (for testing)
-        GrantOnce(player, 65001);   // NPC: Gadgeteer (for testing)
-        GrantOnce(player, 65002);   // NPC: Enchanter (for testing)
-        GrantOnce(player, 65003);   // NPC: Curiosities Merchant (for testing)
-        GrantOnce(player, 60419);   // Destructor's Rod
-        if (!player->HasItemCount(60410, 1, true))   // everyone always carries a Duplicatron (it never wears out)
-            player->AddItem(60410, 1);
+        // (the testing NPC scrolls, the Destructor's Rod and the Duplicatron are no longer handed out)
         // After logging in the game could lose track of the weapon in your hands and swing bare fists
         // until you mounted and dismounted. Do the same refresh for you: draw, then put away.
         {
@@ -1270,6 +1266,7 @@ namespace ZeroCraftDeploy
     // set by ZeroCraftHome: may this player build / deploy here? (Summoning Stone privilege)
     static bool (*BuildCheck)(Player*, float, float, float, std::string&) = nullptr;
     static bool (*AutoRoam)(Player*, Creature*) = nullptr;   // set by the NPC edit menu: new NPCs start roaming
+    static bool (*AutoPatrol)(Player*, Creature*) = nullptr; // set by the NPC edit menu: new guards take over an old guard's beat
     static void (*AutoScale)(Creature*, float) = nullptr;    // set by the NPC edit menu: remembered size
     static float nextHealth = 1.0f;   // a packed NPC comes back with the health it left with
     static const uint32 STONE_GUARD = 911130;   // the attackable heart of a Summoning Stone
@@ -1321,7 +1318,29 @@ namespace ZeroCraftDeploy
 
     // owner key: guild id if > 0, otherwise -(player guid)
     static std::unordered_map<int64, uint32> ownerSlot;               // owner key -> faction template
+    // account-wide loyalty: every character of an account, and every guild any of them is in
+    static std::unordered_map<uint32, std::unordered_set<uint32>> accountChars;    // account -> character lows
+    static std::unordered_map<uint32, std::unordered_set<uint32>> accountGuilds;   // account -> guild ids
+    static void LoadAccount(Player* p)
+    {
+        uint32 acc = p->GetSession()->GetAccountId();
+        auto& chars = accountChars[acc]; chars.clear();
+        auto& guilds = accountGuilds[acc]; guilds.clear();
+        if (QueryResult r = CharacterDatabase.Query(Acore::StringFormat("SELECT c.guid, IFNULL(gm.guildid, 0) FROM characters c LEFT JOIN guild_member gm ON gm.guid = c.guid WHERE c.account = {}", acc)))
+            do { chars.insert((*r)[0].Get<uint32>()); if (uint32 g = (*r)[1].Get<uint32>()) guilds.insert(g); } while (r->NextRow());
+        chars.insert(p->GetGUID().GetCounter());
+        if (p->GetGuildId()) guilds.insert(p->GetGuildId());
+    }
     static std::unordered_map<ObjectGuid::LowType, uint32> spawnFaction; // creature spawn id -> faction template
+    // what each player built most recently (for the Master Builder's undo): kind 0 object, 1 plain creature, 2 deployed NPC
+    static std::unordered_map<ObjectGuid::LowType, std::vector<std::pair<uint32, ObjectGuid::LowType>>> built;
+    static void Remember(Player* p, uint32 kind, ObjectGuid::LowType id)
+    {
+        auto& v = built[p->GetGUID().GetCounter()];
+        v.push_back({ kind, id });
+        if (v.size() > 30)
+            v.erase(v.begin());
+    }
 
     static int64 OwnerKey(Player* player)
     {
@@ -1594,6 +1613,7 @@ namespace ZeroCraftDeploy
         }
         creature->SaveToDB(map->GetId(), (1 << map->GetSpawnMode()), player->GetPhaseMaskForSpawn());
         ObjectGuid::LowType spawnId = creature->GetSpawnId();
+        Remember(player, 2, spawnId);
         creature->CleanupsBeforeDelete();
         delete creature;
 
@@ -1666,6 +1686,12 @@ namespace ZeroCraftDeploy
         // Bankers, Flight Masters and Auctioneers arrive huge, so you can spot them from across town
         if (AutoScale && (creature->IsTaxi() || creature->HasNpcFlag(UNIT_NPC_FLAG_BANKER) || creature->HasNpcFlag(UNIT_NPC_FLAG_AUCTIONEER)))
             AutoScale(creature, 3.0f);
+
+        // fighters take over the beat of one of the city's old guards, if a free one is nearby
+        // (service NPCs, Standard-Bearers and Training Dummies keep their posts)
+        if (AutoPatrol && entry != 911140 && entry != 31144 && !(entry >= 911150 && entry <= 911173) && itemEntry != ITEM_DEPLOY_FLIGHT
+            && AutoPatrol(player, creature))
+            return true;
 
         // every new NPC sets off to roam your land (a stroll), except those who hold a post:
         // Flight Masters, Bankers, Standard-Bearers and Training Dummies
@@ -1975,7 +2001,7 @@ class ZeroCraftDeployPlayer : public PlayerScript
 {
 public:
     ZeroCraftDeployPlayer() : PlayerScript("ZeroCraftDeployPlayer") { }
-    void OnPlayerLogin(Player* player) override { ZeroCraftDeploy::ApplyReactions(player); }
+    void OnPlayerLogin(Player* player) override { ZeroCraftDeploy::LoadAccount(player); ZeroCraftDeploy::ApplyReactions(player); }
 
 };
 
@@ -3082,6 +3108,19 @@ public:
             if (g != ZeroCraftDeploy::ownerSlot.end() && g->second == it->second)
                 return true;
         }
+        // loyal to the whole account: deployed by any of your characters, or by a guild any of them is in
+        uint32 acc = player->GetSession()->GetAccountId();
+        auto ac = ZeroCraftDeploy::accountChars.find(acc);
+        auto ag = ZeroCraftDeploy::accountGuilds.find(acc);
+        for (auto const& kv : ZeroCraftDeploy::ownerSlot)
+        {
+            if (kv.second != it->second)
+                continue;
+            if (kv.first < 0 && ac != ZeroCraftDeploy::accountChars.end() && ac->second.count(uint32(-kv.first)))
+                return true;
+            if (kv.first > 0 && ag != ZeroCraftDeploy::accountGuilds.end() && ag->second.count(uint32(kv.first)))
+                return true;
+        }
         return false;
     }
 
@@ -3211,6 +3250,16 @@ namespace ZeroCraftCommand
             return;
         }
 
+        // ground heights first (the marker has collision - computing after it appears puts NPCs on top of it)
+        std::vector<float> zs;
+        for (size_t i = 0; i < list.size(); ++i)
+        {
+            float spread0 = list.size() > 1 ? 2.5f : 0.0f;
+            float a0 = float(i) * 2.0f * float(M_PI) / float(list.size());
+            float z0 = dst.GetPositionZ();
+            list[i]->UpdateGroundPositionZ(dst.GetPositionX() + spread0 * std::cos(a0), dst.GetPositionY() + spread0 * std::sin(a0), z0);
+            zs.push_back(z0);
+        }
         // Destination marker (like Click-to-Move's ground marker): a small
         // banner planted at the spot for 4 seconds. Replaces the previous one.
         {
@@ -3231,8 +3280,7 @@ namespace ZeroCraftCommand
             float a = float(i) * 2.0f * float(M_PI) / float(list.size());
             float x = dst.GetPositionX() + spread * std::cos(a);
             float y = dst.GetPositionY() + spread * std::sin(a);
-            float z = dst.GetPositionZ();
-            c->UpdateGroundPositionZ(x, y, z);
+            float z = zs[i];
             float o = c->GetAngle(x, y);
 
             c->SetHomePosition(x, y, z, o);
@@ -3806,9 +3854,8 @@ public:
         uint32 cost = g ? UpkeepOf(g->GetId()) : 0;
         bool broke = g && cost && g->GetTotalBankMoney() < cost;
         (void)broke;
-        AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1, "Open my personal bank.", GOSSIP_SENDER_MAIN, A_BANK);
-        AddGossipItemFor(player, GOSSIP_ICON_INTERACT_1, "Open my Guild Vault.", GOSSIP_SENDER_MAIN, A_VAULT);
-        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Move, turn or place him", ZeroCraftNpcEdit_SENDER, 6 /*A_MAIN*/);
+        AddGossipItemFor(player, GOSSIP_ICON_MONEY_BAG, "Open my personal bank.", GOSSIP_SENDER_MAIN, A_BANK);
+        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Transform or place them", ZeroCraftNpcEdit_SENDER, 6 /*A_MAIN*/);
         SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, c->GetGUID());
     }
 
@@ -4084,8 +4131,9 @@ public:
             for (auto const& kv : *sObjectMgr->GetItemTemplateStore())
                 if (kv.second.ScriptId == sid) { entry = kv.first; break; }
         }
-        if (entry && !player->HasItemCount(entry, 1, true))
-            player->AddItem(entry, 1);
+        // Recall Orders are folded into the Master Marshal's Banner ("Pack up")
+        if (entry && player->HasItemCount(entry, 1, true))
+            player->DestroyItemCount(entry, 255, true, false);
     }
 };
 
@@ -4351,6 +4399,50 @@ public:
 // the nearest one your guild placed from the same menu.
 // ============================================================================
 // ============================================================================
+// ZeroCraft Build Panel. With the ZeroCraft addon, "Move / Turn / Resize" on
+// anything you own opens an on-screen panel with arrow buttons instead of
+// gossip menus. The addon says hello at login; its buttons send back the same
+// action numbers the menus use, and the server answers with the new state.
+// ============================================================================
+namespace ZeroCraftPanel
+{
+    struct Session { bool npc = false; ObjectGuid::LowType spawnId = 0; };
+    static std::unordered_set<ObjectGuid::LowType> hasAddon;            // players whose addon said hello this session
+    static std::unordered_map<ObjectGuid::LowType, Session> editing;    // what each player's panel is editing
+    static std::unordered_set<ObjectGuid::LowType> fromPanel;           // set while a panel click is being handled
+
+    static bool Available(Player* p) { return hasAddon.count(p->GetGUID().GetCounter()) != 0; }
+    static bool Clicked(Player* p)   { return fromPanel.count(p->GetGUID().GetCounter()) != 0; }
+
+    // compass heading, clockwise from north (WoW's orientation 0 is north and grows counter-clockwise)
+    static uint32 Heading(float o)
+    {
+        int deg = int(std::lround(Position::NormalizeOrientation(o) * 180.0f / float(M_PI))) % 360;
+        return uint32((360 - deg) % 360);
+    }
+    static char const* Compass(uint32 heading)
+    {
+        static char const* names[] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+        return names[((heading + 22) / 45) % 8];
+    }
+
+    static void Show(Player* p, bool npc, ObjectGuid::LowType spawnId, std::string const& name, float o, float scale,
+                     float moveStep, float turnStep, float sizeStep, bool canStamp)
+    {
+        editing[p->GetGUID().GetCounter()] = { npc, spawnId };
+        CloseGossipMenuFor(p);
+        uint32 h = Heading(o);
+        ChatHandler(p->GetSession()).SendSysMessage(Acore::StringFormat("ZCEDIT:state|{}|{}|{}|{}|{:.2f}|{:g}|{:g}|{:g}|{}",
+            npc ? "npc" : "obj", name, h, Compass(h), scale, moveStep, turnStep, sizeStep, canStamp ? 1 : 0));
+    }
+    static void End(Player* p)
+    {
+        if (editing.erase(p->GetGUID().GetCounter()))
+            ChatHandler(p->GetSession()).SendSysMessage("ZCEDIT:end");
+    }
+}
+
+// ============================================================================
 // ZeroCraft Home Building (ComfyCraft style).
 // Every placed object is a clickable copy of the real one (entry + 2,000,000):
 // hover shows the cog, click opens a menu to move, turn, resize or pick it up.
@@ -4602,6 +4694,19 @@ namespace ZeroCraftHome
         return range.first == range.second ? nullptr : range.first->second;
     }
 
+    // Tiny things (a mug, a candle, a coin) arrive big enough to see: at least ~1.2 yards across, never more than 5x.
+    static float SensibleScale(uint32 goEntry, float scale)
+    {
+        GameObjectTemplate const* info = sObjectMgr->GetGameObjectTemplate(goEntry);
+        GameObjectDisplayInfoEntry const* d = info ? sGameObjectDisplayInfoStore.LookupEntry(info->displayId) : nullptr;
+        if (!d)
+            return scale;
+        float ext = std::max({ d->maxX - d->minX, d->maxY - d->minY, d->maxZ - d->minZ }) * scale;
+        if (ext <= 0.01f || ext >= 1.2f)
+            return scale;
+        return std::min(5.0f, scale * 1.2f / ext);
+    }
+
     static ObjectGuid::LowType Spawn(Map* map, uint32 phase, uint32 entry, Position const& pos, float scale, uint32 guild, uint32 owner)
     {
         if (!sObjectMgr->GetGameObjectTemplate(entry))
@@ -4770,13 +4875,13 @@ namespace ZeroCraftHome
     enum Act
     {
         // main menu
-        A_MOVE = 1, A_TURN, A_RESIZE, A_PICKUP, A_DONE, A_USE, A_PLACE, A_UNSELECT, A_PICKUP10, A_PICKUP30, A_DELETE, A_DELETE_YES, A_DUPLICATE,
+        A_MOVE = 1, A_TURN, A_RESIZE, A_PICKUP, A_DONE, A_USE, A_PLACE, A_UNSELECT, A_PICKUP10, A_PICKUP30, A_DELETE, A_DELETE_YES, A_DUPLICATE, A_STAMP = 20,
         // move menu
         A_MSTEP = 100, A_FWD, A_BACK, A_LEFT, A_RIGHT, A_UP, A_DOWN, A_HERE, A_MFACE,
         // turn menu
-        A_TSTEP = 200, A_TURNL, A_TURNR, A_TURNL90, A_TURNR90, A_FACE, A_FACEAWAY,
+        A_TSTEP = 200, A_TURNL, A_TURNR, A_TURNL90, A_TURNR90, A_FACE, A_FACEAWAY, A_TMATCH, A_TSNAP, A_T180, A_TTARGET,
         // resize menu
-        A_SSTEP = 300, A_BIG, A_SMALL, A_RESET,
+        A_SSTEP = 300, A_BIG, A_SMALL, A_RESET, A_S025, A_S05, A_S2, A_S4,
         // back to the main menu
         A_MAIN = 400,
         // stone services
@@ -4791,7 +4896,7 @@ namespace ZeroCraftHome
     static const float MOVE_STEPS[] = { 0.1f, 0.25f, 0.5f, 1.0f, 2.0f, 5.0f };
     static const float TURN_STEPS[] = { 1.0f, 5.0f, 15.0f, 45.0f };
     static const float SIZE_STEPS[] = { 5.0f, 10.0f, 25.0f, 50.0f };
-    struct Steps { uint8 move = 3, turn = 2, size = 1; };
+    struct Steps { uint8 move = 5, turn = 2, size = 1; };   // 5 yards, 15 degrees, 10% (the Build Panel has no step controls)
     static std::unordered_map<ObjectGuid::LowType, Steps> steps;
 
     static std::string Num(float v)
@@ -4802,8 +4907,21 @@ namespace ZeroCraftHome
         return s;
     }
 
+    // what the Build Panel shows for this object
+    static void PanelState(Player* p, GameObject* go)
+    {
+        Furn const* fu = OfGo(go->GetEntry());
+        Steps& st = steps[p->GetGUID().GetCounter()];
+        ZeroCraftPanel::Show(p, false, go->GetSpawnId(), fu ? fu->name : std::string("Object"), go->GetOrientation(), go->GetObjectScale(),
+            MOVE_STEPS[st.move], TURN_STEPS[st.turn], SIZE_STEPS[st.size], fu && !fu->stone);
+    }
+
     static void MainMenu(Player* p, GameObject* go)
     {
+        bool fromPanel = ZeroCraftPanel::Clicked(p);
+        ZeroCraftPanel::End(p);
+        if (fromPanel)
+            return;   // "Done" on the panel: nothing more to show
         ClearGossipMenuFor(p);
         if (Furn const* fu = OfGo(go->GetEntry()))
         {
@@ -4814,30 +4932,33 @@ namespace ZeroCraftHome
             else if (fu->srcType == GAMEOBJECT_TYPE_SPELL_FOCUS)
                 AddGossipItemFor(p, GOSSIP_ICON_INTERACT_1, "Use it (works for crafting - stand near it)", GOSSIP_SENDER_MAIN, A_USE);
         }
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Move it", GOSSIP_SENDER_MAIN, A_MOVE);
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Place it (use the Builder's Rod and click the ground)", GOSSIP_SENDER_MAIN, A_PLACE);
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, p->HasItemCount(DUPLICATRON, 1)
-            ? "Duplicate it (uses your Tinker's Duplicatron-9000)"
-            : "|cff808080Duplicate it (requires a Tinker's Duplicatron-9000)|r", GOSSIP_SENDER_MAIN, A_DUPLICATE);
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Turn it", GOSSIP_SENDER_MAIN, A_TURN);
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Resize it", GOSSIP_SENDER_MAIN, A_RESIZE);
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, " ", GOSSIP_SENDER_MAIN, A_MAIN);
+        if (ZeroCraftPanel::Available(p))
+            AddGossipItemFor(p, GOSSIP_ICON_INTERACT_2, "Transform it (move, turn, resize)", GOSSIP_SENDER_MAIN, A_MOVE);
+        else
+            AddGossipItemFor(p, GOSSIP_ICON_TAXI, "Move it", GOSSIP_SENDER_MAIN, A_MOVE);
+        AddGossipItemFor(p, GOSSIP_ICON_DOT, "Place it with the Builder's Rod", GOSSIP_SENDER_MAIN, A_PLACE);
+        AddGossipItemFor(p, GOSSIP_ICON_VENDOR, "Duplicate it", GOSSIP_SENDER_MAIN, A_DUPLICATE);
+        if (!ZeroCraftPanel::Available(p))
+        {
+            AddGossipItemFor(p, GOSSIP_ICON_INTERACT_2, "Turn it", GOSSIP_SENDER_MAIN, A_TURN);
+            AddGossipItemFor(p, GOSSIP_ICON_INTERACT_1, "Resize it", GOSSIP_SENDER_MAIN, A_RESIZE);
+        }
         {
             auto sel = selected.find(p->GetGUID().GetCounter());
             if (sel != selected.end() && sel->second == go->GetSpawnId())
-                AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Selected -- click to clear", GOSSIP_SENDER_MAIN, A_UNSELECT);
+                AddGossipItemFor(p, GOSSIP_ICON_DOT, "Selected -- click to clear", GOSSIP_SENDER_MAIN, A_UNSELECT);
         }
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Pick up", GOSSIP_SENDER_MAIN, A_PICKUP);
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Pick up everything within 10 yards", GOSSIP_SENDER_MAIN, A_PICKUP10);
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Pick up everything within 30 yards", GOSSIP_SENDER_MAIN, A_PICKUP30);
+        AddGossipItemFor(p, GOSSIP_ICON_MONEY_BAG, "Pick it up", GOSSIP_SENDER_MAIN, A_PICKUP);
+        AddGossipItemFor(p, GOSSIP_ICON_MONEY_BAG, "Pick up everything within 10 yards", GOSSIP_SENDER_MAIN, A_PICKUP10);
+        AddGossipItemFor(p, GOSSIP_ICON_MONEY_BAG, "Pick up everything within 30 yards", GOSSIP_SENDER_MAIN, A_PICKUP30);
         AddGossipItemFor(p, GOSSIP_ICON_BATTLE, "|cffcc0000Delete it (gone for good)|r", GOSSIP_SENDER_MAIN, A_DELETE_YES);
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, " ", GOSSIP_SENDER_MAIN, A_MAIN);
-        AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Done\nExit edit mode", GOSSIP_SENDER_MAIN, A_DONE);
+        AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Done", GOSSIP_SENDER_MAIN, A_DONE);
         SendGossipMenuFor(p, T_MAIN, go->GetGUID());
     }
 
     static void MoveMenu(Player* p, GameObject* go)
     {
+        if (ZeroCraftPanel::Available(p)) return PanelState(p, go);
         Steps& st = steps[p->GetGUID().GetCounter()];
         ClearGossipMenuFor(p);
         AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Back", GOSSIP_SENDER_MAIN, A_MAIN);
@@ -4855,6 +4976,7 @@ namespace ZeroCraftHome
 
     static void TurnMenu(Player* p, GameObject* go)
     {
+        if (ZeroCraftPanel::Available(p)) return PanelState(p, go);
         Steps& st = steps[p->GetGUID().GetCounter()];
         ClearGossipMenuFor(p);
         AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Back", GOSSIP_SENDER_MAIN, A_MAIN);
@@ -4870,6 +4992,7 @@ namespace ZeroCraftHome
 
     static void ResizeMenu(Player* p, GameObject* go)
     {
+        if (ZeroCraftPanel::Available(p)) return PanelState(p, go);
         ClearGossipMenuFor(p);
         AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Bigger", GOSSIP_SENDER_MAIN, A_BIG);
         AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Smaller", GOSSIP_SENDER_MAIN, A_SMALL);
@@ -4883,9 +5006,9 @@ namespace ZeroCraftHome
         ClearGossipMenuFor(p);
         AddGossipItemFor(p, GOSSIP_ICON_MONEY_BAG, "Open the Guild Vault", GOSSIP_SENDER_MAIN, A_VAULT);
         AddGossipItemFor(p, GOSSIP_ICON_TAXI, "Summon a guildmate", GOSSIP_SENDER_MAIN, A_SUMMONLIST);
-        AddGossipItemFor(p, GOSSIP_ICON_INTERACT_1, "Make this stone my home (Hearthstone comes here)", GOSSIP_SENDER_MAIN, A_HOME);
-        AddGossipItemFor(p, GOSSIP_ICON_INTERACT_2, "Move, turn or pick up this stone", GOSSIP_SENDER_MAIN, A_EDIT);
-        AddGossipItemFor(p, GOSSIP_ICON_INTERACT_2, "Delete something we built nearby", GOSSIP_SENDER_MAIN, A_NEARBY);
+        AddGossipItemFor(p, GOSSIP_ICON_TABARD, "Make this stone my home (Hearthstone comes here)", GOSSIP_SENDER_MAIN, A_HOME);
+        AddGossipItemFor(p, GOSSIP_ICON_INTERACT_1, "Transform or pick up this stone", GOSSIP_SENDER_MAIN, A_EDIT);
+        AddGossipItemFor(p, GOSSIP_ICON_BATTLE, "Delete something we built nearby", GOSSIP_SENDER_MAIN, A_NEARBY);
         AddGossipItemFor(p, GOSSIP_ICON_MONEY_BAG, "Store gold", GOSSIP_SENDER_MAIN, A_DEPANY, "How much gold do you want to store?", 0, true);
         AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Done", GOSSIP_SENDER_MAIN, A_DONE);
         SendGossipMenuFor(p, T_STONE, go->GetGUID());
@@ -5180,7 +5303,10 @@ namespace ZeroCraftHome
         }
 
         if (action == A_DONE)
+        {
+            ZeroCraftPanel::End(p);
             return CloseGossipMenuFor(p);
+        }
         if (action == A_USE)
         {
             if (Usable(fu))
@@ -5201,11 +5327,6 @@ namespace ZeroCraftHome
                 if (fu->stone)
                 {
                     ZeroCraftDeploy::RedError(p, "Summoning Stones can't be copied.");
-                    return MainMenu(p, go);
-                }
-                if (!p->HasItemCount(DUPLICATRON, 1))
-                {
-                    ZeroCraftDeploy::RedError(p, "You need a Tinker's Duplicatron-9000. Gnomes leave them lying around in dungeons.");
                     return MainMenu(p, go);
                 }
                 duplicating.insert(p->GetGUID().GetCounter());
@@ -5247,6 +5368,20 @@ namespace ZeroCraftHome
             ownerPlayer = (*r)[1].Get<uint32>();
         }
 
+        if (action == A_STAMP)
+        {
+            // a copy at your feet, facing the way you face - then nudge it with the arrows
+            if (fu->stone) { ZeroCraftDeploy::RedError(p, "Summoning Stones can't be copied."); return MoveMenu(p, go); }
+            Position at(p->GetPositionX(), p->GetPositionY(), p->GetPositionZ(), p->GetOrientation());
+            std::string err;
+            if (!CanBuildAt(p, at.GetPositionX(), at.GetPositionY(), at.GetPositionZ(), fu->stone, err, 0))
+            {
+                ZeroCraftDeploy::RedError(p, err);
+                return MoveMenu(p, go);
+            }
+            Spawn(map, go->GetPhaseMask(), go->GetEntry(), at, go->GetObjectScale(), ownerGuild, ownerPlayer);
+            return MoveMenu(p, go);
+        }
         if (action == A_DELETE)
         {
             ClearGossipMenuFor(p);
@@ -5309,6 +5444,7 @@ namespace ZeroCraftHome
                 ZeroCraftDeploy::RedError(p, "Your bags are full.");
                 return MainMenu(p, go);
             }
+            ZeroCraftPanel::End(p);
             Despawn(map, id);
             p->StoreNewItem(dest, fu->item, true);
             CloseGossipMenuFor(p);
@@ -5345,6 +5481,22 @@ namespace ZeroCraftHome
             case A_FACE:
             case A_MFACE:    pos.SetOrientation(Position::NormalizeOrientation(away + float(M_PI))); break;
             case A_FACEAWAY: pos.SetOrientation(Position::NormalizeOrientation(away)); break;
+            case A_TMATCH:   pos.SetOrientation(Position::NormalizeOrientation(p->GetOrientation())); break;
+            case A_TSNAP:    { float q = float(M_PI) / 4; pos.SetOrientation(Position::NormalizeOrientation(std::round(pos.GetOrientation() / q) * q)); break; }
+            case A_T180:     pos.SetOrientation(Position::NormalizeOrientation(pos.GetOrientation() + float(M_PI))); break;
+            case A_TTARGET:
+                if (Unit* t = p->GetSelectedUnit())
+                    pos.SetOrientation(Position::NormalizeOrientation(pos.GetAngle(t->GetPositionX(), t->GetPositionY())));
+                else
+                {
+                    ZeroCraftDeploy::RedError(p, "Target something first.");
+                    return TurnMenu(p, go);
+                }
+                break;
+            case A_S025:     scale = 0.25f; break;
+            case A_S05:      scale = 0.5f; break;
+            case A_S2:       scale = 2.0f; break;
+            case A_S4:       scale = 4.0f; break;
             case A_BIG:      scale = std::min(scale * grow, 5.0f); break;
             case A_SMALL:    scale = std::max(scale / grow, 0.1f); break;
             case A_RESET:    scale = 1.0f; break;
@@ -5430,7 +5582,7 @@ namespace ZeroCraftProf
 namespace ZeroCraftEnchanter
 {
     struct Ench { uint32 id; uint32 itemClass; uint32 subMask; uint32 invMask; char const* name; };
-    static std::vector<Ench> const& All()
+    static std::vector<Ench> const& Every()
     {
         static std::vector<Ench> v = {
         { 24, 4, 31u, 1048608u, "Chest - Minor Mana" },
@@ -5551,6 +5703,26 @@ namespace ZeroCraftEnchanter
         };
         return v;
     }
+    // recipe skill of each enchant (from trainers and recipe items); the Enchanter skips beginner work (< 50)
+    static std::unordered_map<uint32, uint32> const& Skill()
+    {
+        static std::unordered_map<uint32, uint32> m = { { 24, 20 }, { 41, 1 }, { 44, 40 }, { 63, 140 }, { 65, 45 }, { 66, 50 }, { 241, 100 }, { 242, 60 }, { 243, 60 }, { 246, 80 }, { 247, 80 }, { 248, 80 }, { 249, 90 }, { 250, 90 }, { 254, 120 }, { 255, 110 }, { 256, 125 }, { 368, 310 }, { 369, 305 }, { 723, 100 }, { 724, 130 }, { 744, 115 }, { 783, 70 }, { 803, 265 }, { 804, 135 }, { 805, 245 }, { 823, 140 }, { 843, 145 }, { 844, 145 }, { 845, 145 }, { 847, 150 }, { 848, 115 }, { 849, 160 }, { 850, 160 }, { 851, 165 }, { 852, 170 }, { 853, 175 }, { 854, 175 }, { 856, 180 }, { 857, 185 }, { 863, 195 }, { 865, 200 }, { 866, 200 }, { 884, 205 }, { 903, 205 }, { 904, 210 }, { 905, 210 }, { 906, 215 }, { 907, 220 }, { 908, 220 }, { 909, 225 }, { 910, 300 }, { 911, 225 }, { 912, 230 }, { 913, 230 }, { 923, 235 }, { 924, 1 }, { 925, 170 }, { 926, 235 }, { 927, 240 }, { 928, 245 }, { 929, 245 }, { 930, 250 }, { 931, 250 }, { 943, 145 }, { 963, 240 }, { 1593, 300 }, { 1594, 310 }, { 1883, 255 }, { 1884, 270 }, { 1885, 295 }, { 1886, 300 }, { 1887, 270 }, { 1888, 265 }, { 1889, 285 }, { 1890, 280 }, { 1891, 300 }, { 1892, 275 }, { 1893, 290 }, { 1894, 285 }, { 1896, 295 }, { 1897, 200 }, { 1898, 300 }, { 1899, 295 }, { 1900, 300 }, { 1903, 300 }, { 1904, 300 }, { 2443, 190 }, { 2463, 175 }, { 2504, 300 }, { 2505, 300 }, { 2563, 290 }, { 2564, 290 }, { 2565, 290 }, { 2567, 300 }, { 2568, 300 }, { 2603, 145 }, { 2613, 300 }, { 2614, 300 }, { 2615, 300 }, { 2616, 300 }, { 2617, 300 }, { 2619, 300 }, { 2620, 300 }, { 2621, 300 }, { 2622, 300 }, { 2646, 290 }, { 2647, 305 }, { 2650, 300 }, { 2653, 310 }, { 2656, 305 }, { 2662, 310 }, { 2934, 305 }, { 3150, 300 }, { 3858, 225 } };
+        return m;
+    }
+    static uint32 SkillOf(uint32 id) { auto it = Skill().find(id); return it == Skill().end() ? 50 : it->second; }
+    static std::vector<Ench> const& All()
+    {
+        static std::vector<Ench> v = []()
+        {
+            std::vector<Ench> out;
+            for (Ench const& e : Every())
+                if (SkillOf(e.id) >= 50)
+                    out.push_back(e);
+            std::stable_sort(out.begin(), out.end(), [](Ench const& a, Ench const& b) { return SkillOf(a.id) > SkillOf(b.id); });
+            return out;
+        }();
+        return v;
+    }
     static bool Fits(Ench const& e, ItemTemplate const* t)
     {
         if (!t || int32(t->Class) != int32(e.itemClass))
@@ -5586,7 +5758,7 @@ namespace ZeroCraftEnchanter
         for (Ench const& e : All())
             if (Fits(e, it->GetTemplate()) && sSpellItemEnchantmentStore.LookupEntry(e.id) && n < 30)
             {
-                AddGossipItemFor(p, GOSSIP_ICON_INTERACT_1, e.name, GOSSIP_SENDER_MAIN, 1000000 + slot * 10000 + e.id);
+                AddGossipItemFor(p, GOSSIP_ICON_INTERACT_1, Acore::StringFormat("{}  ({})", e.name, SkillOf(e.id)), GOSSIP_SENDER_MAIN, 1000000 + slot * 10000 + e.id);
                 ++n;
             }
         SendGossipMenuFor(p, DEFAULT_GOSSIP_MESSAGE, c->GetGUID());
@@ -5882,6 +6054,7 @@ namespace ZeroCraftBuild
             // record the owner BEFORE it appears, so a Summoning Stone claim doesn't sweep it away
             WorldDatabase.DirectExecute(Acore::StringFormat("INSERT INTO zerocraft_placed (kind, spawn_id, owner_guild, owner_player) VALUES (1, {}, {}, {})",
                 id, player->GetGuildId(), player->GetGUID().GetCounter()));
+            ZeroCraftDeploy::Remember(player, 1, id);
             c = new Creature();
             if (!c->LoadCreatureFromDB(id, map, true, true))
             {
@@ -5915,6 +6088,7 @@ namespace ZeroCraftBuild
             delete go;
             return false;
         }
+        go->SetObjectScale(ZeroCraftHome::SensibleScale(goEntry, go->GetObjectScale()));
         go->SaveToDB(map->GetId(), (1 << map->GetSpawnMode()), player->GetPhaseMaskForSpawn());
         ObjectGuid::LowType id = go->GetSpawnId();
         delete go;
@@ -5927,6 +6101,7 @@ namespace ZeroCraftBuild
         sObjectMgr->AddGameobjectToGrid(id, sObjectMgr->GetGameObjectData(id));
         WorldDatabase.DirectExecute(Acore::StringFormat("INSERT INTO zerocraft_placed (kind, spawn_id, owner_guild, owner_player, owner_guild_name) VALUES (0, {}, {}, {}, COALESCE((SELECT name FROM acore_characters.guild WHERE guildid = {}), ''))",
             id, player->GetGuildId(), player->GetGUID().GetCounter(), player->GetGuildId()));
+        ZeroCraftDeploy::Remember(player, 0, id);
         return true;
     }
 
@@ -5977,6 +6152,7 @@ namespace ZeroCraftBuild
         SendGossipMenuFor(player, ZeroCraftHome::T_MAIN, near[0].second->GetGUID());
     }
 
+    static void RemoveSpawn(Map* map, uint32 bestKind, ObjectGuid::LowType bestId);   // defined below
     static void RemoveNearest(Player* player)
     {
         std::string who = Acore::StringFormat("owner_guild = 0 AND owner_player = {}", player->GetGUID().GetCounter());
@@ -6004,7 +6180,13 @@ namespace ZeroCraftBuild
             ZeroCraftDeploy::RedError(player, "Nothing your guild built is within 10 yards.");
             return;
         }
-        Map* map = player->GetMap();
+        RemoveSpawn(player->GetMap(), bestKind, bestId);
+        ChatHandler(player->GetSession()).SendSysMessage("Taken down.");
+    }
+
+    // delete a placed object (kind 0) or plain creature (kind 1) for good
+    static void RemoveSpawn(Map* map, uint32 bestKind, ObjectGuid::LowType bestId)
+    {
         if (bestKind == 1)
         {
             auto range = map->GetCreatureBySpawnIdStore().equal_range(bestId);
@@ -6027,7 +6209,6 @@ namespace ZeroCraftBuild
             WorldDatabase.DirectExecute(Acore::StringFormat("DELETE FROM gameobject WHERE guid = {}", bestId));
         }
         WorldDatabase.DirectExecute(Acore::StringFormat("DELETE FROM zerocraft_placed WHERE kind = {} AND spawn_id = {}", bestKind, bestId));
-        ChatHandler(player->GetSession()).SendSysMessage("Taken down.");
     }
 }
 
@@ -6331,6 +6512,332 @@ public:
     }
 };
 
+// ============================================================================
+// Master Builder's Tome (item 23656): click a spot, and the addon opens a window
+// with every placeable object and every deployable NPC, each with a preview.
+// The window talks back with "ZCMB\t..." addon whispers:
+//   obj <goEntry> [here]        build a catalog/furniture object
+//   thing <action> [here]       build a Builder's Kit thing (object or NPC)
+//   npc <item> <kind> <entry> [here]   deploy an NPC: uses that scroll, or a generic scroll of the kind
+//   own                         send back how many of each scroll you carry
+// "here" = in front of you instead of the spot the tome was clicked on.
+// ============================================================================
+namespace ZeroCraftMaster
+{
+    static const uint32 TOME = 23656;      // Master Builder's Tome: objects and NPCs
+    static const uint32 ORDERS = 28099;    // Master Recruiter's Orders: opens straight on the NPCs
+    static const uint32 CODEX = 6777;      // Master GM Codex: GM commands as buttons (GM accounts only)
+
+    // about 10 yards straight ahead, on the ground, facing the way you face (the clicked spot is no longer used)
+    static Position Spot(Player* p, bool /*here*/)
+    {
+        float o = p->GetOrientation();
+        float x = p->GetPositionX() + 10.0f * std::cos(o);
+        float y = p->GetPositionY() + 10.0f * std::sin(o);
+        float z = p->GetPositionZ();
+        p->UpdateGroundPositionZ(x, y, z);
+        Position pos;
+        pos.Relocate(x, y, z, o);
+        return pos;
+    }
+
+    static void Say(Player* p, std::string const& msg) { ChatHandler(p->GetSession()).SendSysMessage(msg); }
+
+    // "ZCMB:own|item=count,item=count,..." for every scroll the player carries (specific ones and generic kinds)
+    static void SendOwned(Player* p)
+    {
+        // holders of the Recruiter's Orders need no scrolls at all
+        std::string out = p->HasItemCount(ORDERS, 1, true) ? "ZCMB:own|orders=1" : "ZCMB:own|";
+        static std::vector<uint32> items;
+        if (items.empty())
+        {
+            if (QueryResult r = WorldDatabase.Query("SELECT item_entry FROM zerocraft_npcitem"))
+                do { items.push_back((*r)[0].Get<uint32>()); } while (r->NextRow());
+            for (uint32 g : { 823u, 951u, 842u, 1078u, 3504u, 3513u, 25747u, 25748u })
+                items.push_back(g);
+        }
+        std::unordered_map<uint32, uint32> have;
+        for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+            if (Item* it = p->GetItemByPos(INVENTORY_SLOT_BAG_0, i))
+                have[it->GetEntry()] += it->GetCount();
+        for (uint8 b = INVENTORY_SLOT_BAG_START; b < INVENTORY_SLOT_BAG_END; ++b)
+            if (Bag* bag = p->GetBagByPos(b))
+                for (uint32 i = 0; i < bag->GetBagSize(); ++i)
+                    if (Item* it = bag->GetItemByPos(i))
+                        have[it->GetEntry()] += it->GetCount();
+        // in pieces of at most ~180 characters: the client drops very long system messages
+        bool first = out.size() <= 9, any = false;
+        for (uint32 item : items)
+        {
+            auto h = have.find(item);
+            if (h == have.end())
+                continue;
+            std::string part = Acore::StringFormat("{}={}", item, h->second);
+            if (out.size() + part.size() > 180)
+            {
+                Say(p, out);
+                out = "ZCMB:own+|";
+                first = true;
+            }
+            out += (first ? "" : ",") + part;
+            first = false;
+            any = true;
+        }
+        Say(p, out);
+        (void)any;
+    }
+
+    static void Handle(Player* p, std::string const& cmd)
+    {
+        std::vector<std::string> a;
+        for (size_t i = 0, j; i <= cmd.size(); i = j + 1)
+        {
+            j = cmd.find('\t', i);
+            if (j == std::string::npos) j = cmd.size();
+            a.push_back(cmd.substr(i, j - i));
+        }
+        if (a.empty())
+            return;
+        auto num = [&](size_t i) { return i < a.size() ? uint32(std::strtoul(a[i].c_str(), nullptr, 10)) : 0u; };
+        bool here = !a.empty() && a.back() == "here";
+        if (a[0] == "own")
+            return SendOwned(p);
+        if (a[0] == "bigger" || a[0] == "smaller")
+        {
+            // resize the newest thing you built (it stays 'in hand' until you build the next one)
+            auto& v = ZeroCraftDeploy::built[p->GetGUID().GetCounter()];
+            float f = a[0] == "bigger" ? 1.25f : 0.8f;
+            while (!v.empty())
+            {
+                auto [kind, id] = v.back();
+                Map* map = p->GetMap();
+                if (kind == 0)
+                {
+                    auto range = map->GetGameObjectBySpawnIdStore().equal_range(id);
+                    GameObject* go = range.first == range.second ? nullptr : range.first->second;
+                    if (!go) { v.pop_back(); continue; }
+                    // the client only reads an object's size when it appears: respawn it at the new size
+                    float sc = std::min(10.0f, std::max(0.1f, go->GetObjectScale() * f));
+                    std::string name = go->GetGOInfo()->name;
+                    uint32 entry = go->GetEntry(), phase = go->GetPhaseMask();
+                    Position pos = go->GetPosition();
+                    uint32 ownerGuild = p->GetGuildId(), ownerPlayer = p->GetGUID().GetCounter();
+                    if (QueryResult r = WorldDatabase.Query(Acore::StringFormat("SELECT owner_guild, owner_player FROM zerocraft_placed WHERE kind = 0 AND spawn_id = {}", id)))
+                    {
+                        ownerGuild = (*r)[0].Get<uint32>();
+                        ownerPlayer = (*r)[1].Get<uint32>();
+                    }
+                    ZeroCraftHome::Despawn(map, id);
+                    ObjectGuid::LowType nid = ZeroCraftHome::Spawn(map, phase, entry, pos, sc, ownerGuild, ownerPlayer);
+                    if (nid)
+                        v.back() = { 0u, nid };
+                    else
+                        v.pop_back();
+                    Say(p, Acore::StringFormat("ZCMB:scaled|{}|{:.2f}", name, sc));
+                    return;
+                }
+                auto range = map->GetCreatureBySpawnIdStore().equal_range(id);
+                Creature* c = range.first == range.second ? nullptr : range.first->second;
+                if (!c || !c->IsAlive()) { v.pop_back(); continue; }
+                float sc = std::min(10.0f, std::max(0.1f, c->GetObjectScale() * f));
+                if (kind == 2 && ZeroCraftDeploy::AutoScale)
+                    ZeroCraftDeploy::AutoScale(c, sc);   // deployed NPC: remembered size
+                else
+                {
+                    c->SetObjectScale(sc);
+                    WorldDatabase.DirectExecute(Acore::StringFormat("UPDATE creature SET size = {} WHERE guid = {}", sc, id));
+                }
+                Say(p, Acore::StringFormat("ZCMB:scaled|{}|{:.2f}", c->GetName(), sc));
+                return;
+            }
+            Say(p, "ZCMB:scaled||0");
+            return;
+        }
+        if (a[0] == "undo")
+        {
+            auto& v = ZeroCraftDeploy::built[p->GetGUID().GetCounter()];
+            while (!v.empty())
+            {
+                auto [kind, id] = v.back();
+                v.pop_back();
+                Map* map = p->GetMap();
+                std::string name;
+                if (kind == 2)
+                {
+                    auto range = map->GetCreatureBySpawnIdStore().equal_range(id);
+                    Creature* c = range.first == range.second ? nullptr : range.first->second;
+                    if (!c || !c->IsAlive())
+                        continue;   // already gone - try the one before
+                    if (c->IsInCombat()) { ZeroCraftDeploy::RedError(p, "They can't be taken back while fighting."); v.push_back({ kind, id }); return; }
+                    name = c->GetName();
+                    ZeroCraftRecallItem::Pack(p, c, true);   // back into a scroll
+                    Say(p, "ZCMB:undone|" + name + " (scroll returned)");
+                }
+                else
+                {
+                    if (kind == 0)
+                    {
+                        GameObjectData const* d = sObjectMgr->GetGameObjectData(id);
+                        if (!d) continue;
+                        GameObjectTemplate const* t = sObjectMgr->GetGameObjectTemplate(d->id);
+                        name = t ? t->name : "object";
+                    }
+                    else
+                    {
+                        CreatureData const* d = sObjectMgr->GetCreatureData(id);
+                        if (!d) continue;
+                        CreatureTemplate const* t = sObjectMgr->GetCreatureTemplate(d->id);
+                        name = t ? t->Name : "creature";
+                    }
+                    ZeroCraftBuild::RemoveSpawn(map, kind, id);
+                    Say(p, "ZCMB:undone|" + name);
+                }
+                if (kind == 2) SendOwned(p);
+                return;
+            }
+            Say(p, "ZCMB:undone|nothing left to undo");
+            return;
+        }
+        if (p->GetMap()->Instanceable() || p->GetTransport())
+            return ZeroCraftDeploy::RedError(p, "You can only build in the open world.");
+        Position pos = Spot(p, here);
+        if (a[0] == "obj")
+        {
+            GameObjectTemplate const* info = sObjectMgr->GetGameObjectTemplate(num(1));
+            if (!info)
+                return;
+            ZeroCraftBuild::Thing t{ 0, 0, info->entry, info->name.c_str(), 0 };
+            if (ZeroCraftBuild::Place(p, t, pos))
+                Say(p, "ZCMB:built|" + info->name);
+            else
+                ZeroCraftDeploy::RedError(p, "Couldn't build that here.");
+            return;
+        }
+        if (a[0] == "thing")
+        {
+            for (auto const& t : ZeroCraftBuild::Things())
+                if (t.action == num(1))
+                {
+                    if (ZeroCraftBuild::Place(p, t, pos))
+                        Say(p, std::string("ZCMB:built|") + t.name);
+                    else
+                        ZeroCraftDeploy::RedError(p, "Couldn't build that here.");
+                    return;
+                }
+            return;
+        }
+        if (a[0] == "npc")
+        {
+            uint32 item = num(1), kind = num(2), entry = num(3);
+            uint32 use = 0;
+            bool orders = p->HasItemCount(ORDERS, 1, true);   // the Recruiter's Orders supersede every scroll
+            if (orders)
+                use = 0;
+            else if (item && p->HasItemCount(item, 1))
+                use = item;                                   // the scroll of exactly this NPC
+            else if (kind && p->HasItemCount(kind, 1))
+                use = kind;                                   // a generic scroll of the kind: you choose instead of rolling
+            if (!use && !orders)
+            {
+                ZeroCraftDeploy::RedError(p, "You don't have a scroll for that one.");
+                return;
+            }
+            std::string err;
+            if (!ZeroCraftHome::CanBuildAt(p, pos.GetPositionX(), pos.GetPositionY(), pos.GetPositionZ(), false, err))
+                return ZeroCraftDeploy::RedError(p, err);
+            if (ZeroCraftDeploy::Deploy(p, kind, pos, entry))
+            {
+                if (use)
+                    p->DestroyItemCount(use, 1, true);
+                CreatureTemplate const* ct = sObjectMgr->GetCreatureTemplate(entry);
+                Say(p, std::string("ZCMB:built|") + (ct ? ct->Name : std::string("NPC")));
+                SendOwned(p);
+            }
+            return;
+        }
+    }
+}
+
+class ZeroCraftMasterItem : public ItemScript
+{
+public:
+    ZeroCraftMasterItem() : ItemScript("item_zerocraft_master") { }
+
+    bool OnUse(Player* player, Item* item, SpellCastTargets const& targets) override
+    {
+        if (player->GetMap()->Instanceable() || player->GetTransport())
+        {
+            ZeroCraftDeploy::RedError(player, "You can only build in the open world.");
+            return true;
+        }
+        bool recruit = item->GetEntry() == ZeroCraftMaster::ORDERS;
+        bool spot = false;
+        if (WorldLocation const* dst = targets.HasDst() ? targets.GetDstPos() : nullptr)
+        {
+            if (player->GetExactDist(dst->GetPositionX(), dst->GetPositionY(), dst->GetPositionZ()) > 45.0f)
+            {
+                ZeroCraftDeploy::RedError(player, "That spot is too far away.");
+                return true;
+            }
+            Position p;
+            p.Relocate(dst->GetPositionX(), dst->GetPositionY(), dst->GetPositionZ(), player->GetOrientation());
+            ZeroCraftBuild::pendingPos[player->GetGUID().GetCounter()] = p;
+            spot = true;
+        }
+        ZeroCraftMaster::Say(player, Acore::StringFormat("ZCMB:open|{}|{}", spot ? 1 : 0, recruit ? "npc" : "obj"));
+        ZeroCraftMaster::SendOwned(player);
+        return true;
+    }
+};
+
+// The Master GM Codex: a GM account opens it and the addon shows every command as a button.
+// The commands themselves are ordinary ".command" chat lines the addon sends; the server's
+// normal GM security applies to each one.
+class ZeroCraftGmItem : public ItemScript
+{
+public:
+    ZeroCraftGmItem() : ItemScript("item_zerocraft_gm") { }
+    bool OnUse(Player* player, Item* /*item*/, SpellCastTargets const& /*targets*/) override
+    {
+        if (player->GetSession()->GetSecurity() <= SEC_PLAYER)
+        {
+            ZeroCraftDeploy::RedError(player, "The pages are blank to you. Only a Game Master can read this.");
+            return true;
+        }
+        ZeroCraftMaster::Say(player, Acore::StringFormat("ZCGM:open|{}", uint32(player->GetSession()->GetSecurity())));
+        return true;
+    }
+};
+
+class ZeroCraftMasterChat : public ServerScript
+{
+public:
+    ZeroCraftMasterChat() : ServerScript("ZeroCraftMasterChat") { }
+
+    bool CanPacketReceive(WorldSession* session, WorldPacket const& packet) override
+    {
+        if (packet.GetOpcode() != CMSG_MESSAGECHAT || !session || !session->GetPlayer())
+            return true;
+        WorldPacket pk(packet);
+        pk.rpos(0);
+        uint32 type = 0, lang = 0;
+        std::string to, msg;
+        try
+        {
+            pk >> type >> lang;
+            if (type != CHAT_MSG_WHISPER || lang != uint32(LANG_ADDON))
+                return true;
+            pk >> to >> msg;
+        }
+        catch (...) { return true; }
+        if (msg.compare(0, 5, "ZCMB\t") != 0)
+            return true;
+        if (session->GetPlayer()->IsInWorld())
+            ZeroCraftMaster::Handle(session->GetPlayer(), msg.substr(5));
+        return false;
+    }
+};
+
 class ZeroCraftCatalogGiver : public PlayerScript
 {
 public:
@@ -6346,9 +6853,18 @@ public:
             for (auto const& kv : *sObjectMgr->GetItemTemplateStore())
                 if (kv.second.ScriptId == sid) { entry = kv.first; break; }
         }
-        // retired: replaced by the themed Builder's Scrolls
-        if (entry && player->HasItemCount(entry, 1, true))
-            player->DestroyItemCount(entry, 255, true, false);
+        (void)entry;
+        // the Master Builder's Tome (the old catalog's item id): everyone carries exactly one
+        if (!player->HasItemCount(ZeroCraftMaster::TOME, 1, true))
+            player->AddItem(ZeroCraftMaster::TOME, 1);
+        if (!player->HasItemCount(ZeroCraftMaster::ORDERS, 1, true))
+            player->AddItem(ZeroCraftMaster::ORDERS, 1);
+        // the GM Codex follows the account's rights
+        bool gm = player->GetSession()->GetSecurity() > SEC_PLAYER;
+        if (gm && !player->HasItemCount(ZeroCraftMaster::CODEX, 1, true))
+            player->AddItem(ZeroCraftMaster::CODEX, 1);
+        else if (!gm && player->HasItemCount(ZeroCraftMaster::CODEX, 1, true))
+            player->DestroyItemCount(ZeroCraftMaster::CODEX, 255, true, false);
     }
 };
 
@@ -6677,6 +7193,20 @@ namespace ZeroCraftTitanGrip
             p->SetCanTitanGrip(true);
     }
 
+    static void Save(Player* p, uint32 mask);   // defined below
+    static void Ensure(Player* p);
+    static void GrantSwords(Player* p)
+    {
+        Kind const& k = KINDS[0];   // two-handed swords
+        uint32 mask = MaskOf(p);
+        if (!(mask & (1u << k.bit)))
+            Save(p, mask | (1u << k.bit));
+        if (!p->HasSpell(k.proficiency))
+            p->learnSpell(k.proficiency, false);
+        p->SetSkill(k.skill, 0, 300, 300);
+        Ensure(p);
+    }
+
     static void Save(Player* p, uint32 mask)
     {
         masks[p->GetGUID().GetCounter()] = mask;
@@ -6972,7 +7502,7 @@ public:
         }
         Position pos;
         pos.Relocate(x, y, z, std::atan2(player->GetPositionY() - y, player->GetPositionX() - x));   // faces you
-        float scale = fu->stone ? 1.0f : 1.5f;   // furniture arrives big
+        float scale = fu->stone ? 1.0f : ZeroCraftHome::SensibleScale(fu->go, 1.5f);   // furniture arrives big, and never too small to see
         if (!ZeroCraftHome::Spawn(player->GetMap(), player->GetPhaseMaskForSpawn(), fu->go, pos, scale, player->GetGuildId(), player->GetGUID().GetCounter()))
         {
             ZeroCraftDeploy::RedError(player, "Couldn't place that here.");
@@ -7172,20 +7702,90 @@ namespace ZeroCraftNpcEdit
         WorldDatabase.DirectExecute(Acore::StringFormat("UPDATE zerocraft_deployables SET scale = {} WHERE spawn_id = {}", scale, c->GetSpawnId()));
     }
 
-    // routes of the townsfolk who used to live within 80 yards
+    // guards by flag or by name, for picking whose beat a new guard inherits
+    static char const* GUARD_LIKE = "((ct.flags_extra & 0x8000) <> 0 OR ct.name REGEXP 'Guard|Sentry|Sentinel|Bruiser|Peacekeeper|Watchman|Warden|Protector|Grunt|Footman|Defender|Patrol|Enforcer')";
+
+    // routes of the townsfolk (and guards) who used to patrol within 150 yards. Their waypoints are
+    // still in waypoint_data under old guid * 10; zerocraft_deployables.patrol_path says who walks one now.
     static std::vector<std::pair<uint32, std::string>> OldRoutes(Creature* c)
     {
         std::vector<std::pair<uint32, std::string>> v;
         if (QueryResult r = WorldDatabase.Query(Acore::StringFormat(
-            "SELECT DISTINCT r.guid * 10, ct.name, (SELECT COUNT(*) FROM waypoint_data w2 WHERE w2.id = r.guid * 10) FROM zerocraft_removed_creatures r "
-            "JOIN creature_template ct ON ct.entry = r.id JOIN waypoint_data w ON w.id = r.guid * 10 "
-            "WHERE r.map = {} AND POW(r.position_x - {}, 2) + POW(r.position_y - {}, 2) < 6400 LIMIT 12",
-            c->GetMapId(), c->GetPositionX(), c->GetPositionY())))
+            "SELECT r.guid * 10, ct.name, (SELECT COUNT(*) FROM waypoint_data w2 WHERE w2.id = r.guid * 10), "
+            "(SELECT COUNT(*) FROM zerocraft_deployables d WHERE d.patrol_path = r.guid * 10), {} FROM zerocraft_removed_creatures r "
+            "JOIN creature_template ct ON ct.entry = r.id "
+            "WHERE r.map = {} AND r.MovementType = 2 AND EXISTS (SELECT 1 FROM waypoint_data w WHERE w.id = r.guid * 10) "
+            "AND POW(r.position_x - {}, 2) + POW(r.position_y - {}, 2) < 22500 "
+            "ORDER BY 5 DESC, POW(r.position_x - {}, 2) + POW(r.position_y - {}, 2) LIMIT 12",
+            GUARD_LIKE, c->GetMapId(), c->GetPositionX(), c->GetPositionY(), c->GetPositionX(), c->GetPositionY())))
             do
             {
-                v.push_back({ (*r)[0].Get<uint32>(), Acore::StringFormat("Walk {}'s old route ({} stops)", (*r)[1].Get<std::string>(), (*r)[2].Get<uint64>()) });
+                uint64 taken = (*r)[3].Get<uint64>();
+                v.push_back({ (*r)[0].Get<uint32>(), Acore::StringFormat("Walk {}'s old route ({} stops{})", (*r)[1].Get<std::string>(), (*r)[2].Get<uint64>(), taken ? ", someone walks it already" : "") });
             } while (r->NextRow());
         return v;
+    }
+
+    // The free beat of an original guard within 150 yards (nearest first); failing that, any
+    // townsperson's route nobody walks yet. Returns the path id and the original's name.
+    static std::pair<uint32, std::string> FreeOldRoute(Creature* c, bool guardsOnly)
+    {
+        QueryResult r = WorldDatabase.Query(Acore::StringFormat(
+            "SELECT r.guid * 10, ct.name FROM zerocraft_removed_creatures r JOIN creature_template ct ON ct.entry = r.id "
+            "WHERE r.map = {} AND r.MovementType = 2 AND POW(r.position_x - {}, 2) + POW(r.position_y - {}, 2) < 22500 "
+            "AND EXISTS (SELECT 1 FROM waypoint_data w WHERE w.id = r.guid * 10) "
+            "AND NOT EXISTS (SELECT 1 FROM zerocraft_deployables d WHERE d.patrol_path = r.guid * 10) "
+            "{} ORDER BY POW(r.position_x - {}, 2) + POW(r.position_y - {}, 2) LIMIT 1",
+            c->GetMapId(), c->GetPositionX(), c->GetPositionY(), guardsOnly ? std::string("AND ") + GUARD_LIKE : std::string(),
+            c->GetPositionX(), c->GetPositionY()));
+        if (!r)
+            return { 0, "" };
+        return { (*r)[0].Get<uint32>(), (*r)[1].Get<std::string>() };
+    }
+
+    static bool Services(Creature* c);   // defined below
+    static Creature* Find(Map* map, ObjectGuid::LowType id);   // defined below
+    // who holds a post and never patrols: Bankers, Flight Masters, the crafters and merchants
+    static bool HoldsPost(Creature* c)
+    {
+        return c->IsTaxi() || c->HasNpcFlag(UNIT_NPC_FLAG_BANKER) || Services(c) || c->GetEntry() == 911140 || c->GetEntry() == 31144;
+    }
+
+    static bool AdoptRoute(Player* p, Creature* c, bool announce = true)
+    {
+        if (HoldsPost(c))
+            return false;
+        auto route = FreeOldRoute(c, true);
+        if (!route.first)
+            route = FreeOldRoute(c, false);
+        if (!route.first || !sWaypointMgr->GetPath(route.first))
+            return false;
+        SetPatrol(c, route.first);
+        if (announce)
+            ChatHandler(p->GetSession()).PSendSysMessage(Acore::StringFormat("{} takes up {}'s old beat.", c->GetName(), route.second));
+        return true;
+    }
+
+    // every fighter of yours within 250 yards (a claim's reach) who is not already on a route takes up a free old beat
+    static uint32 AdoptRoutesAround(Player* p, Creature* c)
+    {
+        std::vector<ObjectGuid::LowType> ids;
+        if (QueryResult r = WorldDatabase.Query(Acore::StringFormat(
+            "SELECT spawn_id FROM zerocraft_deployables WHERE patrol_path = 0 AND (owner_player = {} OR (owner_guild <> 0 AND owner_guild = {}))",
+            p->GetGUID().GetCounter(), p->GetGuildId())))
+            do { ids.push_back((*r)[0].Get<uint32>()); } while (r->NextRow());
+        uint32 n = 0;
+        for (ObjectGuid::LowType id : ids)
+        {
+            Creature* o = Find(c->GetMap(), id);
+            if (!o || !o->IsAlive() || o->GetExactDist2d(c) > 250.0f || !ZeroCraftOrders::Owns(p, o) || HoldsPost(o))
+                continue;
+            if (o->GetWaypointPath() || escorting.count(o->GetSpawnId()))
+                continue;   // already walking something
+            if (AdoptRoute(p, o, false))
+                ++n;
+        }
+        return n;
     }
 
     static bool Services(Creature* c)
@@ -7194,6 +7794,25 @@ namespace ZeroCraftNpcEdit
             return true;
         return c->GetNpcFlags() & (UNIT_NPC_FLAG_VENDOR_MASK | UNIT_NPC_FLAG_FLIGHTMASTER | UNIT_NPC_FLAG_INNKEEPER |
                                    UNIT_NPC_FLAG_AUCTIONEER | UNIT_NPC_FLAG_STABLEMASTER | UNIT_NPC_FLAG_TRAINER | UNIT_NPC_FLAG_REPAIR);
+    }
+
+    // the one line a service NPC offers before the editing options: an icon and wording for its trade
+    static std::pair<uint32, char const*> ServiceLine(Creature* c)
+    {
+        uint32 e = c->GetEntry();
+        if (e == 911170) return { GOSSIP_ICON_VENDOR,    "Brew me something." };            // Potion Master
+        if (e == 911171) return { GOSSIP_ICON_VENDOR,    "Build me a gadget." };             // Gadgeteer
+        if (e == 911172) return { GOSSIP_ICON_TRAINER,   "Enchant my gear." };               // Enchanter
+        if (e == 911173) return { GOSSIP_ICON_VENDOR,    "Show me your curiosities." };      // Curiosities Merchant
+        if (ZeroCraftProf::Is(e)) return { GOSSIP_ICON_VENDOR, "Let's craft something." };
+        if (c->HasNpcFlag(UNIT_NPC_FLAG_AUCTIONEER))    return { GOSSIP_ICON_MONEY_BAG,  "Open the auction house." };
+        if (c->IsTaxi())                                return { GOSSIP_ICON_TAXI,       "Show me where you can fly." };
+        if (c->HasNpcFlag(UNIT_NPC_FLAG_INNKEEPER))     return { GOSSIP_ICON_TALK,       "Innkeeper, a word." };
+        if (c->HasNpcFlag(UNIT_NPC_FLAG_STABLEMASTER))  return { GOSSIP_ICON_VENDOR,     "Stable my pet." };
+        if (c->HasNpcFlag(UNIT_NPC_FLAG_TRAINER))       return { GOSSIP_ICON_TRAINER,    "Train me." };
+        if (c->HasNpcFlag(UNIT_NPC_FLAG_REPAIR))        return { GOSSIP_ICON_INTERACT_1, "Repair my gear." };
+        if (c->GetNpcFlags() & UNIT_NPC_FLAG_VENDOR_MASK) return { GOSSIP_ICON_VENDOR,   "Show me your wares." };
+        return { GOSSIP_ICON_INTERACT_1, "Use it" };
     }
 
     static Creature* Find(Map* map, ObjectGuid::LowType id)
@@ -7238,11 +7857,11 @@ namespace ZeroCraftNpcEdit
         return true;
     }
 
-    enum { A_USE = 1, A_MOVE, A_TURN, A_PLACE, A_UNSELECT, A_MAIN, A_DONE, A_RESIZE, A_PATROL, A_PATROL2, A_STOPPATROL, A_CIRCLE, A_WANDER, A_ESCORT, A_PACK, A_RECORD, A_RECCANCEL, A_NDELETE, A_NDELETE_YES, A_ROAM, A_ROAM10, A_ROAM30, A_STOP30, A_STOPMAIN, A_CLAIM,
-           A_SSTEP = 300, A_BIG, A_SMALL, A_RESET,
+    enum { A_USE = 1, A_MOVE, A_TURN, A_PLACE, A_UNSELECT, A_MAIN, A_DONE, A_RESIZE, A_PATROL, A_PATROL2, A_STOPPATROL, A_CIRCLE, A_WANDER, A_ESCORT, A_PACK, A_RECORD, A_RECCANCEL, A_NDELETE, A_NDELETE_YES, A_ROAM, A_ROAM10, A_ROAM30, A_STOP30, A_STOPMAIN, A_CLAIM, A_BEATS,
+           A_SSTEP = 300, A_BIG, A_SMALL, A_RESET, A_S025, A_S05, A_S2, A_S4,
            A_ROUTE = 1000,
            A_MSTEP = 100, A_FWD, A_BACK, A_LEFT, A_RIGHT, A_UP, A_DOWN, A_HERE, A_MFACE,
-           A_TSTEP = 200, A_TURNL, A_TURNR, A_TURNL90, A_TURNR90, A_FACE, A_FACEAWAY };
+           A_TSTEP = 200, A_TURNL, A_TURNR, A_TURNL90, A_TURNR90, A_FACE, A_FACEAWAY, A_TMATCH, A_TSNAP, A_T180, A_TTARGET };
 
     // talking to a patroller: he stops, turns to you, and his post stays where it was
     static void HoldStill(Player* p, Creature* c)
@@ -7256,36 +7875,52 @@ namespace ZeroCraftNpcEdit
 
     static void Add(Player* p, std::string const& text, uint32 action) { AddGossipItemFor(p, GOSSIP_ICON_CHAT, text, SENDER, action); }
 
+    // what the Build Panel shows for this NPC
+    static void PanelState(Player* p, Creature* c)
+    {
+        auto& st = ZeroCraftHome::steps[p->GetGUID().GetCounter()];
+        ZeroCraftPanel::Show(p, true, c->GetSpawnId(), c->GetName(), c->GetOrientation(), c->GetObjectScale(),
+            ZeroCraftHome::MOVE_STEPS[st.move], ZeroCraftHome::TURN_STEPS[st.turn], ZeroCraftHome::SIZE_STEPS[st.size], false);
+    }
+
     static void MainMenu(Player* p, Creature* c)
     {
+        bool fromPanel = ZeroCraftPanel::Clicked(p);
+        ZeroCraftPanel::End(p);
+        if (fromPanel)
+            return;   // "Done" on the panel
         ZeroCraftCommand::lastClicked[p->GetGUID().GetCounter()] = c->GetGUID();   // Commander's Banner: Target falls back to this
         ClearGossipMenuFor(p);
-        if (Services(c))
-            AddGossipItemFor(p, GOSSIP_ICON_INTERACT_1, "Use it", SENDER, A_USE);
         if (c->IsTaxi())
             AddGossipItemFor(p, GOSSIP_ICON_TAXI, "Claim this flight point for my guild", SENDER, A_CLAIM);
-        Add(p, "Move it", A_MOVE);
-        Add(p, "Place it (use the Builder's Rod and click the ground)", A_PLACE);
-        Add(p, "Turn it", A_TURN);
-        Add(p, "Resize it", A_RESIZE);
-        Add(p, "Patrol", A_PATROL);
+        if (ZeroCraftPanel::Available(p))
+            AddGossipItemFor(p, GOSSIP_ICON_INTERACT_2, "Transform them (move, turn, resize)", SENDER, A_MOVE);
+        else
+            AddGossipItemFor(p, GOSSIP_ICON_TAXI, "Move them", SENDER, A_MOVE);
+        AddGossipItemFor(p, GOSSIP_ICON_DOT, "Place them with the Builder's Rod", SENDER, A_PLACE);
+        if (!ZeroCraftPanel::Available(p))
+        {
+            AddGossipItemFor(p, GOSSIP_ICON_INTERACT_2, "Turn them", SENDER, A_TURN);
+            AddGossipItemFor(p, GOSSIP_ICON_INTERACT_1, "Resize them", SENDER, A_RESIZE);
+        }
+        AddGossipItemFor(p, GOSSIP_ICON_TABARD, "Patrol", SENDER, A_PATROL);
         {
             auto lk = looks.find(c->GetSpawnId());
             if (c->GetWaypointPath() || escorting.count(c->GetSpawnId()) || (lk != looks.end() && lk->second.path))
-                Add(p, "Stop patrolling - stand guard here", A_STOPMAIN);
+                AddGossipItemFor(p, GOSSIP_ICON_TABARD, "Stop patrolling - stand guard here", SENDER, A_STOPMAIN);
         }
-        Add(p, "Pick up (pack into a scroll - keeps their health)", A_PACK);
+        AddGossipItemFor(p, GOSSIP_ICON_MONEY_BAG, "Pick them up (packs them into a scroll)", SENDER, A_PACK);
         AddGossipItemFor(p, GOSSIP_ICON_BATTLE, "|cffcc0000Delete them (gone for good)|r", SENDER, A_NDELETE_YES);
         auto sel = selected.find(p->GetGUID().GetCounter());
         if (sel != selected.end() && sel->second == c->GetSpawnId())
-            Add(p, "Selected -- click to clear", A_UNSELECT);
-        Add(p, " ", A_MAIN);
-        Add(p, "Done\nExit edit mode", A_DONE);
+            AddGossipItemFor(p, GOSSIP_ICON_DOT, "Selected -- click to clear", SENDER, A_UNSELECT);
+        Add(p, "Done", A_DONE);
         SendGossipMenuFor(p, ZeroCraftHome::T_MAIN, c->GetGUID());
     }
 
     static void MoveMenu(Player* p, Creature* c)
     {
+        if (ZeroCraftPanel::Available(p)) return PanelState(p, c);
         auto& st = ZeroCraftHome::steps[p->GetGUID().GetCounter()];
         ClearGossipMenuFor(p);
         Add(p, "Back", A_MAIN);
@@ -7297,6 +7932,7 @@ namespace ZeroCraftNpcEdit
 
     static void TurnMenu(Player* p, Creature* c)
     {
+        if (ZeroCraftPanel::Available(p)) return PanelState(p, c);
         auto& st = ZeroCraftHome::steps[p->GetGUID().GetCounter()];
         ClearGossipMenuFor(p);
         Add(p, "Back", A_MAIN);
@@ -7324,6 +7960,7 @@ namespace ZeroCraftNpcEdit
 
     static void ResizeMenu(Player* p, Creature* c)
     {
+        if (ZeroCraftPanel::Available(p)) return PanelState(p, c);
         ClearGossipMenuFor(p);
         Add(p, "Bigger", A_BIG); Add(p, "Smaller", A_SMALL);
         SendGossipMenuFor(p, ZeroCraftHome::T_RESIZE, c->GetGUID());
@@ -7505,6 +8142,7 @@ namespace ZeroCraftNpcEdit
     static struct RoamInit { RoamInit() {
         ZeroCraftDeploy::AutoRoam = [](Player* p, Creature* c) { return Roam(p, c); };
         ZeroCraftDeploy::AutoScale = [](Creature* c, float sc) { SetScale(c, sc); };
+        ZeroCraftDeploy::AutoPatrol = [](Player* p, Creature* c) { return AdoptRoute(p, c); };
     } } roamInit;
 
     static std::vector<Creature*> MineNear(Player* p, float range)
@@ -7616,6 +8254,10 @@ namespace ZeroCraftNpcEdit
         Add(p, "EVERYONE within 30 yards: roam my land", A_ROAM30);
         Add(p, "EVERYONE within 30 yards: stop and stand guard", A_STOP30);
         Add(p, "Follow me (bodyguard)", A_ESCORT);
+        AddGossipItemFor(p, GOSSIP_ICON_TABARD, "EVERYONE within 250 yards: walk the old guards' beats", SENDER, A_BEATS);
+        if (!c->IsTaxi() && !c->HasNpcFlag(UNIT_NPC_FLAG_BANKER))
+            for (auto const& r : OldRoutes(c))
+                AddGossipItemFor(p, GOSSIP_ICON_TAXI, r.second, SENDER, A_ROUTE + (r.first / 10) % 1000000);
         auto lk = looks.find(c->GetSpawnId());
         if (c->GetWaypointPath() || escorting.count(c->GetSpawnId()) || (lk != looks.end() && lk->second.path))
             Add(p, "Stop patrolling - stand guard here", A_STOPPATROL);
@@ -7757,6 +8399,17 @@ public:
         }
         if (c->HasNpcFlag(UNIT_NPC_FLAG_BANKER))
             return false;   // the Banker has his own menu (with an edit entry)
+        if (ZeroCraftNpcEdit::Services(c))
+        {
+            // service NPCs talk like the Banker: their trade first, editing behind one line
+            ZeroCraftNpcEdit::HoldStill(p, c);
+            ClearGossipMenuFor(p);
+            auto line = ZeroCraftNpcEdit::ServiceLine(c);
+            AddGossipItemFor(p, line.first, line.second, ZeroCraftNpcEdit::SENDER, ZeroCraftNpcEdit::A_USE);
+            AddGossipItemFor(p, GOSSIP_ICON_CHAT, "Transform or place them", ZeroCraftNpcEdit::SENDER, ZeroCraftNpcEdit::A_MAIN);
+            SendGossipMenuFor(p, DEFAULT_GOSSIP_MESSAGE, c->GetGUID());
+            return true;
+        }
         ZeroCraftNpcEdit::HoldStill(p, c);
         ZeroCraftNpcEdit::MainMenu(p, c);
         return true;
@@ -7779,7 +8432,7 @@ public:
         auto& st = ZeroCraftHome::steps[p->GetGUID().GetCounter()];
         switch (action)
         {
-            case A_DONE: CloseGossipMenuFor(p); c->ResumeMovement(); return true;
+            case A_DONE: ZeroCraftPanel::End(p); CloseGossipMenuFor(p); c->ResumeMovement(); return true;
             case A_MAIN: MainMenu(p, c); return true;
             case A_MOVE: MoveMenu(p, c); return true;
             case A_TURN: TurnMenu(p, c); return true;
@@ -7811,18 +8464,29 @@ public:
                     ZeroCraftDeploy::RedError(p, "They can't pack up while fighting.");
                     return true;
                 }
+                ZeroCraftPanel::End(p);
                 ZeroCraftRecallItem::Pack(p, c);
                 return true;
             case A_SSTEP: st.size = (st.size + 1) % 4; ResizeMenu(p, c); return true;
-            case A_BIG: case A_SMALL: case A_RESET:
+            case A_BIG: case A_SMALL: case A_RESET: case A_S025: case A_S05: case A_S2: case A_S4:
             {
                 float grow = 1.0f + ZeroCraftHome::SIZE_STEPS[st.size] / 100.0f;
-                float sc = action == A_RESET ? 1.0f : action == A_BIG ? std::min(c->GetObjectScale() * grow, 4.0f) : std::max(c->GetObjectScale() / grow, 0.2f);
+                float sc = action == A_RESET ? 1.0f : action == A_S025 ? 0.25f : action == A_S05 ? 0.5f : action == A_S2 ? 2.0f : action == A_S4 ? 4.0f
+                         : action == A_BIG ? std::min(c->GetObjectScale() * grow, 4.0f) : std::max(c->GetObjectScale() / grow, 0.2f);
                 SetScale(c, sc);
                 ResizeMenu(p, c);
                 return true;
             }
             case A_PATROL: PatrolMenu(p, c); return true;
+            case A_BEATS:
+            {
+                uint32 n = AdoptRoutesAround(p, c);
+                ChatHandler(p->GetSession()).PSendSysMessage(n
+                    ? Acore::StringFormat("{} of your people took up the old beats.", n)
+                    : std::string("Nobody free to walk a beat here - or no old routes left within 250 yards."));
+                CloseGossipMenuFor(p);
+                return true;
+            }
             case A_STOPMAIN:
                 SetPatrol(c, 0);
                 c->GetMotionMaster()->Clear();
@@ -7921,6 +8585,19 @@ public:
                 ChatHandler(p->GetSession()).SendSysMessage("ZCROD:start");
                 return true;
             case A_USE:
+                if (c->IsTaxi())
+                {
+                    CloseGossipMenuFor(p);
+                    p->GetSession()->SendTaxiMenu(c);
+                    return true;
+                }
+                if (c->HasNpcFlag(UNIT_NPC_FLAG_AUCTIONEER))
+                {
+                    // straight to the auction window, no gossip detour
+                    CloseGossipMenuFor(p);
+                    p->GetSession()->SendAuctionHello(c->GetGUID(), c);
+                    return true;
+                }
                 if (ZeroCraftProf::Is(c->GetEntry()))
                 {
                     ZeroCraftProf::Open(p, c);
@@ -7965,6 +8642,19 @@ public:
             case A_FACE:
             case A_MFACE:    o = Position::NormalizeOrientation(away + float(M_PI)); break;
             case A_FACEAWAY: o = Position::NormalizeOrientation(away); break;
+            case A_TMATCH:   o = Position::NormalizeOrientation(p->GetOrientation()); break;
+            case A_TSNAP:    { float q = float(M_PI) / 4; o = Position::NormalizeOrientation(std::round(o / q) * q); break; }
+            case A_T180:     o = Position::NormalizeOrientation(o + float(M_PI)); break;
+            case A_TTARGET:
+                if (Unit* t = p->GetSelectedUnit())
+                    o = Position::NormalizeOrientation(c->GetAngle(t->GetPositionX(), t->GetPositionY()));
+                else
+                {
+                    ZeroCraftDeploy::RedError(p, "Target something first.");
+                    TurnMenu(p, c);
+                    return true;
+                }
+                break;
             default:
                 if (action >= A_ROUTE)
                 {
@@ -7991,6 +8681,74 @@ public:
         MoveTo(p, c, x, y, z, o);
         if (action / 100 == 2) TurnMenu(p, c); else MoveMenu(p, c);
         return true;
+    }
+};
+
+// The Build Panel talks back: "ZCEDIT\thello" at login, "ZCEDIT\tclose", or "ZCEDIT\t<action>"
+// for a button. A button click is handed to the same gossip handler the menus use.
+class ZeroCraftPanelChat : public ServerScript
+{
+public:
+    ZeroCraftPanelChat() : ServerScript("ZeroCraftPanelChat") { }
+
+    bool CanPacketReceive(WorldSession* session, WorldPacket const& packet) override
+    {
+        if (packet.GetOpcode() != CMSG_MESSAGECHAT || !session || !session->GetPlayer())
+            return true;
+        WorldPacket pk(packet);
+        pk.rpos(0);
+        uint32 type = 0, lang = 0;
+        std::string to, msg;
+        try
+        {
+            pk >> type >> lang;
+            if (type != CHAT_MSG_WHISPER || lang != uint32(LANG_ADDON))
+                return true;
+            pk >> to >> msg;
+        }
+        catch (...) { return true; }
+        if (msg.compare(0, 7, "ZCEDIT\t") != 0)
+            return true;
+        Player* p = session->GetPlayer();
+        ObjectGuid::LowType low = p->GetGUID().GetCounter();
+        std::string cmd = msg.substr(7);
+        if (cmd == "hello") { ZeroCraftPanel::hasAddon.insert(low); return false; }
+        if (cmd == "close") { ZeroCraftPanel::End(p); return false; }
+        uint32 action = uint32(std::strtoul(cmd.c_str(), nullptr, 10));
+        auto it = ZeroCraftPanel::editing.find(low);
+        if (!action || it == ZeroCraftPanel::editing.end() || !p->IsInWorld())
+            return false;
+        ZeroCraftPanel::Session ses = it->second;
+        ZeroCraftPanel::fromPanel.insert(low);
+        if (ses.npc)
+        {
+            if (Creature* c = ZeroCraftNpcEdit::Find(p->GetMap(), ses.spawnId))
+                sScriptMgr->OnGossipSelect(p, c, ZeroCraftNpcEdit::SENDER, action);
+            else
+                ZeroCraftPanel::End(p);
+        }
+        else
+        {
+            if (GameObject* go = ZeroCraftHome::Find(p->GetMap(), ses.spawnId))
+                sScriptMgr->OnGossipSelect(p, go, GOSSIP_SENDER_MAIN, action);
+            else
+                ZeroCraftPanel::End(p);
+        }
+        ZeroCraftPanel::fromPanel.erase(low);
+        return false;
+    }
+};
+
+class ZeroCraftPanelLogin : public PlayerScript
+{
+public:
+    ZeroCraftPanelLogin() : PlayerScript("ZeroCraftPanelLogin") { }
+    void OnPlayerLogin(Player* p) override  { Forget(p); }
+    void OnPlayerLogout(Player* p) override { Forget(p); }
+    static void Forget(Player* p)
+    {
+        ZeroCraftPanel::hasAddon.erase(p->GetGUID().GetCounter());
+        ZeroCraftPanel::editing.erase(p->GetGUID().GetCounter());
     }
 };
 
@@ -8428,6 +9186,477 @@ public:
     }
 };
 
+// ============================================================================
+// Master Marshal's Banner (item 23701): command and control for your NPCs, RTS style.
+// Using it on the ground carries out the armed ground order (default: "Move here") for the
+// chosen group and plants a green marker there for a moment. The addon window ("ZCCM")
+// picks WHO (target / within 30 yd / within 250 yd / everyone on the map) and WHAT.
+//   ZCCM\twho\t<target|near|claim|map>     ZCCM\tarm\t<move|roam>     ZCCM\tdo\t<order>
+// Orders that need no spot run at once: come, follow, hold, post, beats, roam, attack,
+// aggressive, defensive, passive, pack, stop.
+// ============================================================================
+namespace ZeroCraftMarshal
+{
+    static const uint32 ITEM = 23701;
+    static const uint32 MARKER = 911300;   // Marshal's Marker (green crystal - no longer used)
+    static const uint32 ARROW = 911301;    // Marshal's Arrow: three floor arrows point at the destination for 2 seconds
+    static const uint32 FLAG = 188020;     // Camp Banner: one per plotted route point, until the order is given
+    // armed: what a ground click does (attack-move by default); picked: sticky selection
+    struct State { std::string who = "near"; std::string armed = "attack"; std::vector<Position> route; std::vector<ObjectGuid> flags; ObjectGuid picked; bool rts = false; };
+    static std::unordered_map<ObjectGuid::LowType, State> state;
+
+    static void ClearRoute(Player* p)
+    {
+        State& st = state[p->GetGUID().GetCounter()];
+        for (ObjectGuid g : st.flags)
+            if (GameObject* go = ObjectAccessor::GetGameObject(*p, g))
+            {
+                go->SetRespawnTime(0);
+                go->Delete();
+            }
+        st.flags.clear();
+        st.route.clear();
+    }
+
+    static void Say(Player* p, std::string const& m) { ChatHandler(p->GetSession()).SendSysMessage(m); }
+
+    // one unit of the group says its click-line back to you: "Yes, milord" in whatever voice it has
+    static uint32 VoiceOf(uint32 display)
+    {
+        static std::unordered_map<uint32, uint32> m;
+        if (m.empty())
+            for (auto const& e : ZC_NPC_VOICE)
+                m[e.first] = e.second;
+        auto it = m.find(display);
+        return it == m.end() ? 0 : it->second;
+    }
+    static void Acknowledge(Player* p, std::vector<Creature*> const& list)
+    {
+        if (list.empty())
+            return;
+        Creature* c = list[urand(0, uint32(list.size()) - 1)];
+        if (uint32 snd = VoiceOf(c->GetDisplayId()))
+            c->PlayDirectSound(snd, p);
+    }
+
+    // the NPCs an order applies to. Post-holders (Bankers, Flight Masters, crafters, merchants)
+    // never march, but they can be packed up.
+    static std::vector<Creature*> Selection(Player* p, bool includePosts = false)
+    {
+        std::vector<Creature*> out;
+        State& st = state[p->GetGUID().GetCounter()];
+        if (st.who == "target")
+        {
+            // RTS selection: the unit you have targeted, else the last one you targeted (clicking away
+            // does not lose it), else the last one you talked to
+            Creature* sel = ObjectAccessor::GetCreature(*p, p->GetTarget());
+            if (sel && ZeroCraftOrders::Owns(p, sel))
+                st.picked = sel->GetGUID();
+            else
+            {
+                Creature* pk = ObjectAccessor::GetCreature(*p, st.picked);
+                if (pk && pk->IsAlive() && ZeroCraftOrders::Owns(p, pk))
+                    sel = pk;
+                else
+                {
+                    auto lc = ZeroCraftCommand::lastClicked.find(p->GetGUID().GetCounter());
+                    Creature* last = lc != ZeroCraftCommand::lastClicked.end() ? ObjectAccessor::GetCreature(*p, lc->second) : nullptr;
+                    sel = (last && ZeroCraftOrders::Owns(p, last)) ? last : nullptr;
+                }
+            }
+            if (sel && sel->IsAlive() && (includePosts || !ZeroCraftNpcEdit::HoldsPost(sel)))
+                out.push_back(sel);
+            return out;
+        }
+        if (st.who == "kind")
+        {
+            // Warcraft-style: everyone of the same kind as the selected unit, within 60 yards of it
+            Creature* sel = ObjectAccessor::GetCreature(*p, p->GetTarget());
+            if (!sel || !ZeroCraftOrders::Owns(p, sel)) sel = ObjectAccessor::GetCreature(*p, st.picked);
+            if (!sel || !sel->IsAlive() || !ZeroCraftOrders::Owns(p, sel)) return out;
+            auto& store = p->GetMap()->GetCreatureBySpawnIdStore();
+            for (auto const& pair : ZeroCraftDeploy::spawnFaction)
+            {
+                auto r = store.equal_range(pair.first);
+                for (auto it = r.first; it != r.second; ++it)
+                {
+                    Creature* c = it->second;
+                    if (c && c->IsInWorld() && c->IsAlive() && c->GetEntry() == sel->GetEntry() && c->GetExactDist2d(sel) <= 60.0f
+                        && ZeroCraftOrders::Owns(p, c) && (includePosts || !ZeroCraftNpcEdit::HoldsPost(c)))
+                        out.push_back(c);
+                }
+            }
+            return out;
+        }
+        float range = st.who == "near" ? 150.0f : st.who == "claim" ? 600.0f : 0.0f;
+        auto& store = p->GetMap()->GetCreatureBySpawnIdStore();
+        for (auto const& pair : ZeroCraftDeploy::spawnFaction)
+        {
+            auto r = store.equal_range(pair.first);
+            for (auto it = r.first; it != r.second; ++it)
+            {
+                Creature* c = it->second;
+                if (!c || !c->IsInWorld() || !c->IsAlive() || !ZeroCraftOrders::Owns(p, c))
+                    continue;
+                if (range > 0.0f && c->GetExactDist2d(p) > range)
+                    continue;
+                if (!includePosts && ZeroCraftNpcEdit::HoldsPost(c))
+                    continue;
+                out.push_back(c);
+            }
+        }
+        return out;
+    }
+
+    static void OwnSpeed(Creature* c)
+    {
+        if (CreatureTemplate const* t = c->GetCreatureTemplate())
+            c->SetSpeedRate(MOVE_RUN, t->speed_run);
+    }
+
+    static void Unpatrol(Creature* c)
+    {
+        OwnSpeed(c);
+        ZeroCraftNpcEdit::escorting.erase(c->GetSpawnId());
+        if (ZeroCraftCommand::StopPatrol)
+            ZeroCraftCommand::StopPatrol(c);
+    }
+
+    // new post for an NPC: home, saved position, and walk there
+    static void Post(Creature* c, float x, float y, float z, float o)
+    {
+        c->SetHomePosition(x, y, z, o);
+        CreatureData& data = sObjectMgr->NewOrExistCreatureData(c->GetSpawnId());
+        data.posX = x; data.posY = y; data.posZ = z; data.orientation = o;
+        data.wander_distance = 0.0f; data.movementType = 0;
+        WorldDatabase.Execute(Acore::StringFormat(
+            "UPDATE creature SET position_x = {}, position_y = {}, position_z = {}, orientation = {}, wander_distance = 0, MovementType = 0 WHERE guid = {}",
+            x, y, z, o, c->GetSpawnId()));
+        Unpatrol(c);
+        c->GetMotionMaster()->Clear();
+        c->GetMotionMaster()->MovePoint(0, x, y, z);
+    }
+
+    // March the group to a spot: ranks facing the way you face, 2.5 yards apart. Ground heights
+    // are worked out BEFORE the marker appears, so nobody ends up standing on it in mid-air.
+    static void March(Player* p, std::vector<Creature*> const& list, float dx, float dy, float dz, bool marker)
+    {
+        float o = p->GetOrientation();
+        float fx = std::cos(o), fy = std::sin(o), rx = std::cos(o - float(M_PI) / 2), ry = std::sin(o - float(M_PI) / 2);
+        uint32 n = uint32(list.size());
+        uint32 cols = n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : n <= 16 ? 4 : n <= 25 ? 5 : 6;
+        std::vector<std::array<float, 4>> spots;
+        for (uint32 i = 0; i < n; ++i)
+        {
+            float col = float(i % cols) - float(cols - 1) / 2.0f, row = float(i / cols);
+            float x = dx + rx * col * 2.5f - fx * row * 2.5f;
+            float y = dy + ry * col * 2.5f - fy * row * 2.5f;
+            float z = dz;
+            list[i]->UpdateGroundPositionZ(x, y, z);
+            spots.push_back({ x, y, z, o });
+        }
+        if (marker)
+        {
+            // the old click-to-move look: three arrows around the spot, pointing in at it, gone in 2 seconds
+            float mz = dz;
+            p->UpdateGroundPositionZ(dx, dy, mz);
+            for (int k = 0; k < 3; ++k)
+            {
+                float a = o + float(k) * 2.0f * float(M_PI) / 3.0f;
+                // model is 1.7 yd tall with its base 0.41 below the pivot: at size 1.8 lift it 0.75 so it stands on the ground
+                float ax = dx + 2.4f * std::cos(a), ay = dy + 2.4f * std::sin(a), az = mz;
+                p->UpdateGroundPositionZ(ax, ay, az);
+                p->SummonGameObject(ARROW, ax, ay, az + 0.75f, Position::NormalizeOrientation(a + float(M_PI)), 0, 0, 0, 0, 3);
+            }
+        }
+        // under your command they move at your speed (mount and all); Stop gives them their own speed back
+        float rate = p->GetSpeedRate(MOVE_RUN);
+        for (uint32 i = 0; i < n; ++i)
+        {
+            Post(list[i], spots[i][0], spots[i][1], spots[i][2], spots[i][3]);
+            list[i]->SetWalk(false);
+            list[i]->SetSpeedRate(MOVE_RUN, std::max(rate, 1.0f));
+        }
+    }
+
+    static std::string Who(Player* p)
+    {
+        std::string const& w = state[p->GetGUID().GetCounter()].who;
+        return w == "target" ? "your target" : w == "kind" ? "everyone of the selected kind nearby" : w == "near" ? "everyone within 150 yards" : w == "claim" ? "everyone within 600 yards" : "everyone on this map";
+    }
+
+    static void Do(Player* p, std::string const& order);
+
+    static void Ground(Player* p, WorldLocation const& dst)
+    {
+        State& st = state[p->GetGUID().GetCounter()];
+        if (st.armed == "follow") { Do(p, "follow"); return; }   // the click just confirms: fall in behind me
+        auto list = st.armed == "route" ? std::vector<Creature*>() : Selection(p);
+        if (st.armed != "route" && list.empty()) { ZeroCraftDeploy::RedError(p, "Nobody to order: " + Who(p) + " - no marching NPCs of yours there."); return; }
+        Acknowledge(p, list);
+        if (st.armed == "route")
+        {
+            // plot the next point: ground height first, then the flag on top of it
+            float x = dst.GetPositionX(), y = dst.GetPositionY(), z = dst.GetPositionZ();
+            p->UpdateGroundPositionZ(x, y, z);
+            Position pt; pt.Relocate(x, y, z, 0.0f);
+            st.route.push_back(pt);
+            if (GameObject* f = p->SummonGameObject(FLAG, x, y, z, p->GetOrientation(), 0, 0, 0, 0, 0))
+                st.flags.push_back(f->GetGUID());
+            char const* letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            size_t i = st.route.size() - 1;
+            Say(p, Acore::StringFormat("ZCCM:ok|Point {} planted. Click the ground for the next one, or send them on the route.", i < 26 ? std::string(1, letters[i]) : std::to_string(i + 1)));
+            return;
+        }
+        if (st.armed == "roam")
+        {
+            // a roaming post at the spot: they walk there, then wander around it
+            March(p, list, dst.GetPositionX(), dst.GetPositionY(), dst.GetPositionZ(), true);
+            for (Creature* c : list)
+            {
+                ObjectGuid g = c->GetGUID();
+                c->m_Events.AddEventAtOffset([c, g, p]() { if (c->IsInWorld() && c->GetGUID() == g && c->IsAlive()) ZeroCraftNpcEdit::Roam(p, c); }, Seconds(6));
+            }
+            Say(p, Acore::StringFormat("ZCCM:ok|{} sent to roam around the marker.", list.size()));
+            return;
+        }
+        if (st.armed == "attack" || st.armed == "move")
+        {
+            // attack-move (the default for every ground click): advance on the spot and fight anything hostile met on the way or there
+            for (Creature* c : list) c->SetReactState(REACT_AGGRESSIVE);
+            March(p, list, dst.GetPositionX(), dst.GetPositionY(), dst.GetPositionZ(), true);
+            Say(p, Acore::StringFormat("ZCCM:ok|{} advancing on the marker, weapons out.", list.size()));
+            return;
+        }
+        March(p, list, dst.GetPositionX(), dst.GetPositionY(), dst.GetPositionZ(), true);
+        Say(p, Acore::StringFormat("ZCCM:ok|{} marching to the marker.", list.size()));
+    }
+
+    static void Do(Player* p, std::string const& order)
+    {
+        if (order == "routeclear")
+        {
+            ClearRoute(p);
+            Say(p, "ZCCM:ok|Route cleared, flags down.");
+            return;
+        }
+        if (order == "routego")
+        {
+            State& st = state[p->GetGUID().GetCounter()];
+            if (st.route.size() < 2) { ZeroCraftDeploy::RedError(p, "Plot at least two points first (Plot a patrol route, then click the ground)."); return; }
+            auto list = Selection(p);
+            if (list.empty()) { ZeroCraftDeploy::RedError(p, "Nobody to order: " + Who(p) + " - no marching NPCs of yours there."); return; }
+            Acknowledge(p, list);
+            for (Creature* c : list)
+            {
+                uint32 path = ZeroCraftNpcEdit::PATH_BASE + c->GetSpawnId();
+                Unpatrol(c);
+                WorldDatabase.DirectExecute(Acore::StringFormat("DELETE FROM waypoint_data WHERE id = {}", path));
+                std::string values;
+                for (size_t i = 0; i < st.route.size(); ++i)
+                {
+                    Position const& pt = st.route[i];
+                    values += Acore::StringFormat("{}({}, {}, {}, {}, {}, 0, 0, 1500, 0, 0, 0, 100, 0)", i ? "," : "", path, i + 1, pt.GetPositionX(), pt.GetPositionY(), pt.GetPositionZ());
+                }
+                WorldDatabase.DirectExecute("INSERT INTO waypoint_data (id, point, position_x, position_y, position_z, orientation, velocity, delay, smoothTransition, move_type, action, action_chance, wpguid) VALUES " + values);
+                sWaypointMgr->ReloadPath(path);
+                ZeroCraftNpcEdit::SetPatrol(c, path);
+            }
+            uint32 n = uint32(list.size()), pts = uint32(st.route.size());
+            ClearRoute(p);   // order received and understood: the flags come down
+            Say(p, Acore::StringFormat("ZCCM:ok|{} walking the {}-point circuit, round and round, until told otherwise.", n, pts));
+            return;
+        }
+        if (order == "pack")
+        {
+            auto list = Selection(p, true);
+            uint32 n = 0;
+            for (Creature* c : list)
+                if (!c->IsInCombat() && c->GetEntry() != ZeroCraftDeploy::STONE_GUARD && ZeroCraftRecallItem::Pack(p, c, true))
+                    ++n;
+            Say(p, Acore::StringFormat("ZCCM:ok|{} packed back into scrolls.", n));
+            return;
+        }
+        auto list = Selection(p);
+        if (list.empty()) { ZeroCraftDeploy::RedError(p, "Nobody to order: " + Who(p) + " - no marching NPCs of yours there."); return; }
+        uint32 n = uint32(list.size());
+        Acknowledge(p, list);
+        if (order == "come")
+        {
+            float o = p->GetOrientation();
+            March(p, list, p->GetPositionX() + 4.0f * std::cos(o), p->GetPositionY() + 4.0f * std::sin(o), p->GetPositionZ(), true);
+            Say(p, Acore::StringFormat("ZCCM:ok|{} coming to you.", n));
+        }
+        else if (order == "follow")
+        {
+            for (Creature* c : list)
+            {
+                Unpatrol(c);
+                ZeroCraftNpcEdit::escorting[c->GetSpawnId()] = p->GetGUID();
+                c->SetWalk(false);
+                c->SetSpeedRate(MOVE_RUN, std::max(p->GetSpeedRate(MOVE_RUN), p->IsMounted() ? p->GetSpeedRate(MOVE_RUN) : 1.0f));   // keep up with you, mount and all
+                c->GetMotionMaster()->Clear();
+                c->GetMotionMaster()->MoveFollow(p, 2.5f, frand(float(M_PI) * 0.6f, float(M_PI) * 1.4f));
+            }
+            Say(p, Acore::StringFormat("ZCCM:ok|{} following you.", n));
+        }
+        else if (order == "hold" || order == "stop")
+        {
+            // Stop: everything cancelled - patrol, follow, roam, fight, movement. They stand where they are, and that is their post now.
+            for (Creature* c : list)
+            {
+                Unpatrol(c);
+                c->CombatStop(true);
+                c->AttackStop();
+                c->InterruptNonMeleeSpells(false);
+                c->StopMoving();
+                c->GetMotionMaster()->Clear(false);
+                c->GetMotionMaster()->MoveIdle();
+                c->LoadPath(0);
+                c->SetWanderDistance(0.0f);
+                c->SetDefaultMovementType(IDLE_MOTION_TYPE);
+                float x = c->GetPositionX(), y = c->GetPositionY(), z = c->GetPositionZ(), o = c->GetOrientation();
+                c->SetHomePosition(x, y, z, o);
+                CreatureData& data = sObjectMgr->NewOrExistCreatureData(c->GetSpawnId());
+                data.posX = x; data.posY = y; data.posZ = z; data.orientation = o;
+                data.wander_distance = 0.0f; data.movementType = 0;
+                WorldDatabase.Execute(Acore::StringFormat(
+                    "UPDATE creature SET position_x = {}, position_y = {}, position_z = {}, orientation = {}, wander_distance = 0, MovementType = 0 WHERE guid = {}",
+                    x, y, z, o, c->GetSpawnId()));
+            }
+            Say(p, Acore::StringFormat("ZCCM:ok|{} stopped.", n));
+        }
+        else if (order == "post")
+        {
+            for (Creature* c : list) { Unpatrol(c); c->GetMotionMaster()->Clear(); c->GetMotionMaster()->MoveTargetedHome(); }
+            Say(p, Acore::StringFormat("ZCCM:ok|{} returning to their posts.", n));
+        }
+        else if (order == "beats")
+        {
+            uint32 got = 0;
+            for (Creature* c : list) if (ZeroCraftNpcEdit::AdoptRoute(p, c, false)) ++got;
+            Say(p, got ? Acore::StringFormat("ZCCM:ok|{} of {} took up old guard beats.", got, n) : std::string("ZCCM:ok|No free old beats within 150 yards of them."));
+        }
+        else if (order == "roam")
+        {
+            uint32 got = 0;
+            for (Creature* c : list) if (ZeroCraftNpcEdit::Roam(p, c)) ++got;
+            Say(p, Acore::StringFormat("ZCCM:ok|{} roaming your land.", got));
+        }
+        else if (order == "attack")
+        {
+            Unit* t = p->GetSelectedUnit();
+            if (!t || !t->IsAlive() || (t->GetTypeId() == TYPEID_UNIT && ZeroCraftOrders::Owns(p, t->ToCreature())))
+            { ZeroCraftDeploy::RedError(p, "Target an enemy first."); return; }
+            for (Creature* c : list)
+            {
+                Unpatrol(c);
+                c->SetReactState(REACT_AGGRESSIVE);
+                if (c->AI()) c->AI()->AttackStart(t);
+            }
+            Say(p, Acore::StringFormat("ZCCM:ok|{} attacking {}.", n, t->GetName()));
+        }
+        else if (order == "aggressive" || order == "defensive" || order == "passive")
+        {
+            ReactStates rs = order == "aggressive" ? REACT_AGGRESSIVE : order == "defensive" ? REACT_DEFENSIVE : REACT_PASSIVE;
+            for (Creature* c : list) { c->SetReactState(rs); if (rs == REACT_PASSIVE) c->CombatStop(true); }
+            Say(p, Acore::StringFormat("ZCCM:ok|{} now {}.", n, order));
+        }
+        else
+            ZeroCraftDeploy::RedError(p, "Unknown order: " + order);
+    }
+
+    static void SendState(Player* p)
+    {
+        State& st = state[p->GetGUID().GetCounter()];
+        Creature* pk = ObjectAccessor::GetCreature(*p, st.picked);
+        std::string pickedName = (pk && pk->IsAlive() && ZeroCraftOrders::Owns(p, pk)) ? pk->GetName() : std::string();
+        Say(p, Acore::StringFormat("ZCCM:open|{}|{}|{}|{}|{}", st.who, st.armed, Selection(p).size(), st.route.size(), pickedName));
+    }
+}
+
+class ZeroCraftMarshalItem : public ItemScript
+{
+public:
+    ZeroCraftMarshalItem() : ItemScript("item_zerocraft_marshal") { }
+    bool OnUse(Player* player, Item* /*item*/, SpellCastTargets const& targets) override
+    {
+        if (WorldLocation const* dst = targets.HasDst() ? targets.GetDstPos() : nullptr)
+            ZeroCraftMarshal::Ground(player, *dst);
+        ZeroCraftMarshal::SendState(player);   // the window opens (or refreshes) with every use
+        return true;   // never consumed, never casts
+    }
+};
+
+// RTS Mode: the Marshal's Spyglass (item 33336). On: you fly, and the addon swaps camera and action bar.
+class ZeroCraftRtsItem : public ItemScript
+{
+public:
+    ZeroCraftRtsItem() : ItemScript("item_zerocraft_rts") { }
+    bool OnUse(Player* p, Item* /*item*/, SpellCastTargets const& /*targets*/) override
+    {
+        auto& st = ZeroCraftMarshal::state[p->GetGUID().GetCounter()];
+        st.rts = !st.rts;
+        if (st.rts)
+        {
+            p->SetCanFly(true);
+            ZeroCraftMarshal::Say(p, "ZCRTS:on");
+        }
+        else
+        {
+            p->SetCanFly(false);
+            ZeroCraftMarshal::Say(p, "ZCRTS:off");
+        }
+        ZeroCraftMarshal::SendState(p);
+        return true;
+    }
+};
+
+class ZeroCraftMarshalChat : public ServerScript
+{
+public:
+    ZeroCraftMarshalChat() : ServerScript("ZeroCraftMarshalChat") { }
+    bool CanPacketReceive(WorldSession* session, WorldPacket const& packet) override
+    {
+        if (packet.GetOpcode() != CMSG_MESSAGECHAT || !session || !session->GetPlayer())
+            return true;
+        WorldPacket pk(packet);
+        pk.rpos(0);
+        uint32 type = 0, lang = 0;
+        std::string to, msg;
+        try
+        {
+            pk >> type >> lang;
+            if (type != CHAT_MSG_WHISPER || lang != uint32(LANG_ADDON))
+                return true;
+            pk >> to >> msg;
+        }
+        catch (...) { return true; }
+        if (msg.compare(0, 5, "ZCCM\t") != 0)
+            return true;
+        Player* p = session->GetPlayer();
+        if (!p->IsInWorld())
+            return false;
+        std::string rest = msg.substr(5);
+        size_t tab = rest.find('\t');
+        std::string cmd = rest.substr(0, tab), arg = tab == std::string::npos ? "" : rest.substr(tab + 1);
+        auto& st = ZeroCraftMarshal::state[p->GetGUID().GetCounter()];
+        if (cmd == "who" && (arg == "target" || arg == "near" || arg == "claim" || arg == "map" || arg == "kind")) { st.who = arg; ZeroCraftMarshal::SendState(p); }
+        else if (cmd == "arm" && (arg == "move" || arg == "roam" || arg == "route" || arg == "attack" || arg == "follow")) { st.armed = arg; ZeroCraftMarshal::SendState(p); }
+        else if (cmd == "do") { ZeroCraftMarshal::Do(p, arg); ZeroCraftMarshal::SendState(p); }
+        else if (cmd == "pick")
+        {
+            // the addon reports a friendly NPC you targeted (hex GUID string)
+            uint64 raw = std::strtoull(arg.c_str(), nullptr, 16);
+            Creature* c = ObjectAccessor::GetCreature(*p, ObjectGuid(raw));
+            if (c && ZeroCraftOrders::Owns(p, c)) { st.picked = c->GetGUID(); ZeroCraftMarshal::SendState(p); }
+        }
+        else if (cmd == "unpick") { st.picked.Clear(); ZeroCraftMarshal::SendState(p); }
+        else if (cmd == "state") ZeroCraftMarshal::SendState(p);
+        return false;
+    }
+};
+
 // Everyone carries one banner; the old Meteor-based spell is removed.
 class ZeroCraftCommandGiver : public PlayerScript
 {
@@ -8438,9 +9667,11 @@ public:
         if (player->HasSpell(ZeroCraftCommand::SPELL_COMMAND))
             player->removeSpell(ZeroCraftCommand::SPELL_COMMAND, SPEC_MASK_ALL, false);
         if (!player->HasItemCount(23701, 1, true))
-            player->AddItem(23701, 1); // red: targeted NPC only
-        if (!player->HasItemCount(23700, 1, true))
-            player->AddItem(23700, 1); // blue: all NPCs
+            player->AddItem(23701, 1); // the Master Marshal's Banner (was the red banner)
+        if (player->HasItemCount(23700, 1, true))
+            player->DestroyItemCount(23700, 255, true, false); // the blue banner is folded into the Marshal
+        if (player->HasItemCount(33336, 1, true))
+            player->DestroyItemCount(33336, 255, true, false); // RTS Mode spyglass: retired
     }
 };
 
@@ -8876,6 +10107,9 @@ void Addmod_instant_60_bisScripts()
     new ZeroCraftCommandBanner("item_zerocraft_command", false);
     new ZeroCraftCommandBanner("item_zerocraft_command_all", true);
     new ZeroCraftCommandGiver();
+    new ZeroCraftMarshalItem();
+    new ZeroCraftRtsItem();
+    new ZeroCraftMarshalChat();
     new ZeroCraftAmmo();
     new ZeroCraftLFG();
     new ZeroCraftBordersPlayer();
@@ -8913,6 +10147,11 @@ void Addmod_instant_60_bisScripts()
     new ZeroCraftClaimSafe();
     new ZeroCraftStoneQuery();
     new ZeroCraftNpcEditScript();
+    new ZeroCraftPanelChat();
+    new ZeroCraftPanelLogin();
+    new ZeroCraftMasterItem();
+    new ZeroCraftGmItem();
+    new ZeroCraftMasterChat();
     new ZeroCraftDummyItem();
     new ZeroCraftHeraldItem();
     new ZeroCraftHeraldView();

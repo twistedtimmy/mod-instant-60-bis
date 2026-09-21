@@ -674,3 +674,118 @@ for i = 1, NUM_CONTAINER_FRAMES do
         end)
     end
 end
+
+---------------------------------------------------------------- Build Panel
+-- Move / Turn / Resize on anything you own opens this panel instead of gossip menus.
+-- Server -> addon: "ZCEDIT:state|kind|name|heading|compass|scale|moveStep|turnStep|sizeStep|canStamp"
+--                  and "ZCEDIT:end".  Addon -> server: "hello", "close", or a button's action number.
+local function zcEditSend(what) SendAddonMessage("ZCEDIT", tostring(what), "WHISPER", UnitName("player")) end
+local ZA = {   -- action numbers shared with the server's menus
+    mstep = 100, away = 101, toward = 102, left = 103, right = 104, up = 105, down = 106, here = 107,
+    tstep = 200, tleft = 201, tright = 202, faceme = 205, faceaway = 206, match = 207, snap = 208, spin = 209, target = 210,
+    sstep = 300, bigger = 301, smaller = 302, reset = 303, quarter = 304, half = 305, double = 306, huge = 307,
+    obj = { pickup = 4, done = 5, place = 7, stamp = 20 },
+    npc = { pickup = 15, done = 7, place = 4 },
+}
+local bp = CreateFrame("Frame", "ZeroCraftBuildPanel", UIParent)
+bp:SetWidth(336); bp:SetHeight(198)
+bp:SetPoint("TOP", UIParent, "TOP", 0, -90)
+bp:SetFrameStrata("DIALOG")
+bp:SetBackdrop({ bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark", edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true, tileSize = 32, edgeSize = 24, insets = { left = 6, right = 6, top = 6, bottom = 6 } })
+bp:SetMovable(true); bp:EnableMouse(true); bp:RegisterForDrag("LeftButton"); bp:SetClampedToScreen(true)
+bp:SetScript("OnDragStart", bp.StartMoving); bp:SetScript("OnDragStop", bp.StopMovingOrSizing)
+bp.kind = "obj"
+local bpTitle = bp:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge"); bpTitle:SetPoint("TOP", 0, -14)
+local bpInfo = bp:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); bpInfo:SetPoint("TOP", bpTitle, "BOTTOM", 0, -2)
+local bpClose = CreateFrame("Button", nil, bp, "UIPanelCloseButton"); bpClose:SetPoint("TOPRIGHT", -4, -4)
+bpClose:SetScript("OnClick", function() zcEditSend(ZA[bp.kind].done); bp.serverClosed = true; bp:Hide() end)
+
+local function bpTip(b) b:SetScript("OnEnter", function(self) if self.tip then GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText(self.tip); GameTooltip:Show() end end); b:SetScript("OnLeave", function() GameTooltip:Hide() end) end
+local function bpIcon(w, h, tex, x, y, action, tip)
+    local b = CreateFrame("Button", nil, bp)
+    b:SetWidth(w); b:SetHeight(h); b:SetPoint("TOPLEFT", x, y)
+    b:SetNormalTexture(tex .. "-Up"); b:SetPushedTexture(tex .. "-Down"); b:SetHighlightTexture(tex .. "-Highlight", "ADD")
+    b.action = action; b.tip = tip; bpTip(b)
+    b:SetScript("OnClick", function(self) if self.action then zcEditSend(self.action) end end)
+    return b
+end
+local function bpText(text, w, x, y, action, tip)
+    local b = CreateFrame("Button", nil, bp, "UIPanelButtonTemplate")
+    b:SetWidth(w); b:SetHeight(20); b:SetPoint("TOPLEFT", x, y); b:SetText(text)
+    b.action = action; b.tip = tip; bpTip(b)
+    b:SetScript("OnClick", function(self) if self.action then zcEditSend(self.action) end end)
+    return b
+end
+local function bpLabel(text, x, y) local f = bp:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall"); f:SetPoint("TOPLEFT", x, y); f:SetText(text); return f end
+
+-- MOVE: a d-pad seen from where you stand. One round arrow texture, rotated, so every arrow matches.
+local ROT = {   -- SetTexCoord corners (UL, LL, UR, LR) that turn the right-pointing page arrow
+    right = { 0, 0, 0, 1, 1, 0, 1, 1 },
+    down  = { 0, 1, 1, 1, 0, 0, 1, 0 },
+    left  = { 1, 1, 1, 0, 0, 1, 0, 0 },
+    up    = { 1, 0, 0, 0, 1, 1, 0, 1 },
+}
+local function bpArrow(size, x, y, dir, action, tip)
+    local b = CreateFrame("Button", nil, bp)
+    b:SetWidth(size); b:SetHeight(size); b:SetPoint("TOPLEFT", x, y)
+    b:SetNormalTexture("Interface\\Buttons\\UI-SpellbookIcon-NextPage-Up")
+    b:SetPushedTexture("Interface\\Buttons\\UI-SpellbookIcon-NextPage-Down")
+    b:SetHighlightTexture("Interface\\Buttons\\UI-SpellbookIcon-NextPage-Up", "ADD")
+    local c = ROT[dir]
+    for _, t in ipairs({ b:GetNormalTexture(), b:GetPushedTexture(), b:GetHighlightTexture() }) do t:SetTexCoord(c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]) end
+    b.action = action; b.tip = tip; bpTip(b)
+    b:SetScript("OnClick", function(self) if self.action then zcEditSend(self.action) end end)
+    return b
+end
+bpLabel("MOVE", 22, -56)
+bpArrow(32, 44, -66,  "up",    ZA.away,   "Away from you")
+bpArrow(32, 12, -96,  "left",  ZA.left,   "To your left")
+bpArrow(32, 76, -96,  "right", ZA.right,  "To your right")
+bpArrow(32, 44, -126, "down",  ZA.toward, "Towards you")
+bpLabel("HEIGHT", 122, -70)
+bpArrow(24, 128, -84,  "up",   ZA.up,   "Raise it 5 yards")
+bpArrow(24, 128, -108, "down", ZA.down, "Lower it 5 yards")
+
+-- TURN: 15 degrees a click
+bpLabel("TURN", 192, -56)
+bpIcon(32, 32, "Interface\\Buttons\\UI-RotationLeft-Button",  204, -68, ZA.tleft,  "Turn left 15 degrees")
+bpIcon(32, 32, "Interface\\Buttons\\UI-RotationRight-Button", 244, -68, ZA.tright, "Turn right 15 degrees")
+
+-- SIZE: 10% a click
+bpLabel("SIZE", 192, -110)
+bpIcon(22, 22, "Interface\\Buttons\\UI-MinusButton", 208, -124, ZA.smaller, "Smaller (10%)")
+bpIcon(22, 22, "Interface\\Buttons\\UI-PlusButton",  248, -124, ZA.bigger,  "Bigger (10%)")
+
+-- and the rest
+bpText("Bring it here", 150, 14, -162, ZA.here, "Moves it to your feet, facing you")
+local bpDone = bpText("Done", 100, 190, -162, ZA.obj.done, "Close")
+
+local function bpUpdate(rest)
+    local kind, name, heading, compass, scale, ms, ts, ss, canStamp = strsplit("|", rest)
+    bp.kind = (kind == "npc") and "npc" or "obj"
+    local acts = ZA[bp.kind]
+    bpTitle:SetText(name or "")
+    bpInfo:SetText(string.format("Facing %s\194\176 %s     Size %sx", heading or "?", compass or "", scale or "?"))
+    bpDone.action = acts.done
+    bp:Show()
+end
+bp:SetScript("OnHide", function(self)
+    if not self.serverClosed then zcEditSend("close") end
+    self.serverClosed = nil
+end)
+bp:Hide()
+tinsert(UISpecialFrames, "ZeroCraftBuildPanel")
+local bsys = CreateFrame("Frame")
+bsys:RegisterEvent("CHAT_MSG_SYSTEM")
+bsys:RegisterEvent("PLAYER_ENTERING_WORLD")
+bsys:SetScript("OnEvent", function(self, event, msg)
+    if event == "PLAYER_ENTERING_WORLD" then zcEditSend("hello"); return end
+    if not msg then return end
+    if msg == "ZCEDIT:end" then bp.serverClosed = true; bp:Hide(); return end
+    local rest = msg:match("^ZCEDIT:state|(.*)$")
+    if rest then bpUpdate(rest) end
+end)
+ChatFrame_AddMessageEventFilter("CHAT_MSG_SYSTEM", function(self, event, msg)
+    if msg and msg:sub(1, 7) == "ZCEDIT:" then return true end
+end)
