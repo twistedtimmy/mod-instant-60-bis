@@ -1,0 +1,7 @@
+zerocraft_bars_cleaned	35
+zerocraft_granted	19
+zerocraft_mounts_reset	4
+zerocraft_packed	22
+zerocraft_pirates	21
+zerocraft_rebels	23
+zerocraft_titangrip	9
